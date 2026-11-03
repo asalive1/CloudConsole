@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Janus, { type JanusJS } from "janus-gateway";
+import DelayControls from "./DelayControls";
 
 type JanusMessage = JanusJS.Message;
 type JanusPluginHandle = JanusJS.PluginHandle;
@@ -403,6 +404,9 @@ export default function LiveAudioConnection({ participant, onLeave }: Props) {
         </div>
       )}
       {error && <p className="error" role="alert">{error}</p>}
+      {(participant.role === "host" || participant.role === "co_host") && (
+        <DelayControls accessToken={participant.access_token} />
+      )}
       <button type="button" className="text-button" onClick={leave}>Leave studio</button>
     </section>
   );

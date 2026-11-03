@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use gstreamer as gst;
@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 mod pipeline;
 
-use pipeline::{AudioEngine, AudioMetrics, EngineError};
+use pipeline::{AudioEngine, AudioMetrics, DelayStatus, EngineError};
 
 #[derive(Clone)]
 struct AppState {
@@ -100,6 +100,11 @@ struct OutputResponse {
     state: &'static str,
 }
 
+#[derive(Deserialize)]
+struct ConfigureDelayRequest {
+    delay_seconds: u32,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -118,6 +123,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(health))
         .route("/ready", get(health))
         .route("/metrics", get(metrics))
+        .route("/delay", get(delay_status))
+        .route("/delay/config", patch(configure_delay))
+        .route("/delay/dump", post(dump_delay))
+        .route("/delay/end", post(end_delay))
         .route("/sources", get(list_sources).post(create_source))
         .route("/sources/{id}", delete(remove_source))
         .route("/sources/{id}/recover", post(recover_source))
@@ -146,6 +155,33 @@ async fn health() -> Json<HealthResponse> {
 async fn metrics(State(state): State<AppState>) -> Result<Json<AudioMetrics>, ApiError> {
     let engine = state.engine.lock().await;
     Ok(Json(engine.metrics()?))
+}
+
+async fn delay_status(
+    State(state): State<AppState>,
+) -> Result<Json<DelayStatus>, ApiError> {
+    Ok(Json(state.engine.lock().await.delay_status()?))
+}
+
+async fn configure_delay(
+    State(state): State<AppState>,
+    Json(request): Json<ConfigureDelayRequest>,
+) -> Result<Json<DelayStatus>, ApiError> {
+    Ok(Json(
+        state
+            .engine
+            .lock()
+            .await
+            .configure_delay(request.delay_seconds)?,
+    ))
+}
+
+async fn dump_delay(State(state): State<AppState>) -> Result<Json<DelayStatus>, ApiError> {
+    Ok(Json(state.engine.lock().await.dump_delay()?))
+}
+
+async fn end_delay(State(state): State<AppState>) -> Result<Json<DelayStatus>, ApiError> {
+    Ok(Json(state.engine.lock().await.end_delay()?))
 }
 
 async fn list_sources(

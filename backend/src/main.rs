@@ -90,6 +90,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .bind(station_id)
     .execute(&pool)
     .await?;
+    sqlx::query(
+        "INSERT INTO station_delay_settings (station_id) VALUES ($1) ON CONFLICT (station_id) DO NOTHING",
+    )
+    .bind(station_id)
+    .execute(&pool)
+    .await?;
 
     let (mixer_updates, _) = broadcast::channel(128);
     let state = AppState {
@@ -109,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         janus_room_lock: Arc::new(Mutex::new(())),
         mixer_updates,
     };
+    routes::restore_delay_settings(&state).await?;
     let app = Router::new()
         .route("/api/health", get(routes::health))
         .route("/api/ready", get(routes::ready))
@@ -152,6 +159,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(routes::get_guest_session),
         )
         .route("/api/users", get(routes::list_users))
+        .route(
+            "/api/delay",
+            get(routes::get_delay_status).patch(routes::configure_delay),
+        )
+        .route("/api/delay/dump", axum::routing::post(routes::dump_delay))
+        .route("/api/delay/end", axum::routing::post(routes::end_delay))
         .route(
             "/api/mixer/channels",
             get(routes::list_mixer_channels),

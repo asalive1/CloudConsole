@@ -69,6 +69,16 @@ select { width: 100%; padding: 12px 13px; border: 1px solid #35445a; border-radi
 .invitation-created p { color: #a7f3d0; font-size: 12px; }
 .invitation-created code { overflow-wrap: anywhere; color: #d1fae5; font-size: 11px; }
 .live-panel { max-width: none; margin-bottom: 16px; }
+.delay-panel { max-width: none; margin-bottom: 16px; }
+.delay-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 16px; }
+.delay-config { display: grid; gap: 6px; color: #cbd5e1; font-size: 12px; }
+.delay-config span { display: flex; align-items: center; gap: 8px; }
+.delay-config input { width: 90px; padding: 9px 10px; }
+.delay-meter { margin-top: 16px; }
+.delay-meter-heading { display: flex; justify-content: space-between; gap: 12px; color: #9aa8bc; font-size: 12px; }
+.delay-meter-heading strong { color: #d1fae5; }
+.delay-meter progress { display: block; width: 100%; height: 9px; margin-top: 8px; accent-color: #10b981; }
+.delay-note { margin-top: 12px; }
 .mixer-panel { max-width: none; margin-bottom: 16px; }
 .mixer-empty { margin-top: 18px; }
 .mixer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 18px; }

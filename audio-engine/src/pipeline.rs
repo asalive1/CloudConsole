@@ -2,6 +2,8 @@ use std::{
     collections::HashMap,
     net::IpAddr,
     sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 use gstreamer as gst;
@@ -188,6 +190,33 @@ pub struct AudioMetrics {
     pub last_pipeline_error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelayMode {
+    Normal,
+    Dumped,
+    Rebuilding,
+    EndingDelay,
+    Live,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DelayStatus {
+    pub configured_delay_seconds: u32,
+    pub buffered_delay_seconds: f64,
+    pub recovery_percent: f64,
+    pub state: DelayMode,
+}
+
+#[derive(Clone, Debug)]
+struct DelayRuntime {
+    configured_delay_seconds: u32,
+    target_delay_seconds: u32,
+    buffered_delay_seconds: f64,
+    state: DelayMode,
+    last_micro_skip: Instant,
+}
+
 #[derive(Default)]
 struct LiveMetrics {
     source_peaks: HashMap<Uuid, Vec<f64>>,
@@ -217,6 +246,9 @@ struct ActiveOutput {
 pub struct AudioEngine {
     pipeline: gst::Pipeline,
     mixer: gst::Element,
+    delay_queue: gst::Element,
+    delay_pitch: gst::Element,
+    delay_state: Arc<Mutex<DelayRuntime>>,
     program_tee: gst::Element,
     sources: HashMap<Uuid, ActiveSource>,
     outputs: HashMap<Uuid, ActiveOutput>,
@@ -226,6 +258,14 @@ pub struct AudioEngine {
 impl AudioEngine {
     pub fn new() -> Result<Self, EngineError> {
         let pipeline = gst::Pipeline::new();
+        let configured_delay_seconds = 5;
+        let delay_state = Arc::new(Mutex::new(DelayRuntime {
+            configured_delay_seconds,
+            target_delay_seconds: configured_delay_seconds,
+            buffered_delay_seconds: 0.0,
+            state: DelayMode::Rebuilding,
+            last_micro_skip: Instant::now(),
+        }));
         let mixer = gst::ElementFactory::make("audiomixer")
             .name("program_mixer")
             .build()?;
@@ -239,15 +279,50 @@ impl AudioEngine {
             .name("level-program")
             .property("message", true)
             .build()?;
+        let delay_queue = gst::ElementFactory::make("queue")
+            .name("delay_buffer")
+            .property("max-size-buffers", 0u32)
+            .property("max-size-bytes", 0u32)
+            .property("max-size-time", 65_000_000_000u64)
+            .property(
+                "min-threshold-time",
+                u64::from(configured_delay_seconds) * 1_000_000_000,
+            )
+            .build()?;
+        let delay_convert = gst::ElementFactory::make("audioconvert")
+            .name("delay_convert")
+            .build()?;
+        let delay_caps = gst::ElementFactory::make("capsfilter")
+            .name("delay_caps")
+            .property(
+                "caps",
+                gst::Caps::builder("audio/x-raw")
+                    .field("format", "F32LE")
+                    .field("rate", 48_000i32)
+                    .field("channels", 2i32)
+                    .build(),
+            )
+            .build()?;
+        let delay_pitch = gst::ElementFactory::make("pitch")
+            .name("delay_tempo")
+            .property("tempo", 1.0f32)
+            .property("pitch", 1.0f32)
+            .build()?;
+        let output_convert = gst::ElementFactory::make("audioconvert")
+            .name("program_output_convert")
+            .build()?;
         let program_tee = gst::ElementFactory::make("tee")
             .name("program_tee")
             .build()?;
         let output_queue = gst::ElementFactory::make("queue")
             .name("local_null_queue")
+            .property("max-size-buffers", 5u32)
+            .property("max-size-bytes", 0u32)
+            .property("max-size-time", 0u64)
             .build()?;
         let null_sink = gst::ElementFactory::make("fakesink")
             .name("local_null_sink")
-            .property("sync", false)
+            .property("sync", true)
             .property("async", false)
             .build()?;
 
@@ -256,21 +331,81 @@ impl AudioEngine {
             &convert,
             &resample,
             &level,
+            &delay_convert,
+            &delay_caps,
+            &delay_queue,
+            &delay_pitch,
+            &output_convert,
             &program_tee,
             &output_queue,
             &null_sink,
         ])?;
-        gst::Element::link_many([&mixer, &convert, &resample, &level, &program_tee])?;
+        gst::Element::link_many([
+            &mixer,
+            &convert,
+            &resample,
+            &level,
+            &delay_convert,
+            &delay_caps,
+            &delay_queue,
+            &delay_pitch,
+            &output_convert,
+            &program_tee,
+        ])?;
         output_queue.link(&null_sink)?;
         link_request_pad(&program_tee, "src_%u", &output_queue, "sink")?;
+        let delay_src = delay_queue
+            .static_pad("src")
+            .ok_or_else(|| EngineError::Pipeline("delay queue has no source pad".to_owned()))?;
+        let ending_state = Arc::clone(&delay_state);
+        let delay_probe = delay_src.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            let Some(buffer) = info.buffer() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let Ok(mut delay) = ending_state.lock() else {
+                tracing::error!("delay state lock is poisoned");
+                return gst::PadProbeReturn::Ok;
+            };
+            if delay.state != DelayMode::EndingDelay {
+                return gst::PadProbeReturn::Ok;
+            }
+            let is_silent = match buffer.map_readable() {
+                Ok(mapped) => is_silent_pcm(mapped.as_slice()),
+                Err(error) => {
+                    tracing::warn!(%error, "could not inspect delay audio buffer");
+                    false
+                }
+            };
+            if is_silent {
+                return gst::PadProbeReturn::Drop;
+            }
+            if delay.last_micro_skip.elapsed() >= Duration::from_millis(500) {
+                delay.last_micro_skip = Instant::now();
+                return gst::PadProbeReturn::Drop;
+            }
+            gst::PadProbeReturn::Ok
+        });
+        if delay_probe.is_none() {
+            return Err(EngineError::Pipeline(
+                "could not register delay audio probe".to_owned(),
+            ));
+        }
         pipeline.set_state(gst::State::Playing)?;
 
         let metrics = Arc::new(Mutex::new(LiveMetrics::default()));
         start_bus_monitor(&pipeline, Arc::clone(&metrics));
+        start_delay_monitor(
+            delay_queue.clone(),
+            delay_pitch.clone(),
+            Arc::clone(&delay_state),
+        );
 
         Ok(Self {
             pipeline,
             mixer,
+            delay_queue,
+            delay_pitch,
+            delay_state,
             program_tee,
             sources: HashMap::new(),
             outputs: HashMap::new(),
@@ -503,6 +638,7 @@ impl AudioEngine {
                     packets_lost,
                     configured_latency_ms: source.input.configured_latency_ms(),
                 }
+
             })
             .collect();
         Ok(AudioMetrics {
@@ -514,6 +650,106 @@ impl AudioEngine {
             sources,
             last_pipeline_error: live_metrics.last_pipeline_error.clone(),
         })
+    }
+
+    pub fn delay_status(&self) -> Result<DelayStatus, EngineError> {
+        let delay = self
+            .delay_state
+            .lock()
+            .map_err(|_| EngineError::Pipeline("delay state lock is poisoned".to_owned()))?;
+        Ok(delay_status(&delay))
+    }
+
+    pub fn configure_delay(&mut self, delay_seconds: u32) -> Result<DelayStatus, EngineError> {
+        if !(5..=60).contains(&delay_seconds) {
+            return Err(EngineError::InvalidRequest(
+                "delay must be between 5 and 60 seconds".to_owned(),
+            ));
+        }
+        let mut delay = self
+            .delay_state
+            .lock()
+            .map_err(|_| EngineError::Pipeline("delay state lock is poisoned".to_owned()))?;
+        delay.configured_delay_seconds = delay_seconds;
+        delay.target_delay_seconds = delay_seconds;
+        delay.last_micro_skip = Instant::now();
+        let target = f64::from(delay_seconds);
+        if delay.buffered_delay_seconds + 0.05 < target {
+            self.delay_queue.set_property("min-threshold-time", 0u64);
+            self.delay_pitch.set_property("tempo", 0.95f32);
+            delay.state = DelayMode::Rebuilding;
+        } else if delay.buffered_delay_seconds > target + 0.05 {
+            self.delay_queue.set_property("min-threshold-time", 0u64);
+            self.delay_pitch.set_property("tempo", 1.05f32);
+            delay.state = DelayMode::EndingDelay;
+        } else {
+            self.delay_queue.set_property(
+                "min-threshold-time",
+                u64::from(delay_seconds) * 1_000_000_000,
+            );
+            self.delay_pitch.set_property("tempo", 1.0f32);
+            delay.state = DelayMode::Normal;
+        }
+        Ok(delay_status(&delay))
+    }
+
+    pub fn dump_delay(&mut self) -> Result<DelayStatus, EngineError> {
+        let mut delay = self
+            .delay_state
+            .lock()
+            .map_err(|_| EngineError::Pipeline("delay state lock is poisoned".to_owned()))?;
+        if delay.buffered_delay_seconds <= 0.05 {
+            return Err(EngineError::Conflict(
+                "DUMP is unavailable because no delay buffer exists".to_owned(),
+            ));
+        }
+        if !self
+            .delay_queue
+            .send_event(gst::event::FlushStart::new())
+            || !self
+                .delay_queue
+                .send_event(gst::event::FlushStop::new(true))
+        {
+            return Err(EngineError::Pipeline(
+                "the delay buffer could not be flushed".to_owned(),
+            ));
+        }
+        let segment = gst::FormattedSegment::<gst::ClockTime>::new();
+        if !self
+            .delay_queue
+            .send_event(gst::event::Segment::new(&segment))
+        {
+            return Err(EngineError::Pipeline(
+                "the delay stream segment could not be restarted".to_owned(),
+            ));
+        }
+        self.delay_queue.set_property("min-threshold-time", 0u64);
+        self.delay_pitch.set_property("tempo", 0.95f32);
+        delay.target_delay_seconds = delay.configured_delay_seconds;
+        delay.last_micro_skip = Instant::now();
+        delay.buffered_delay_seconds = 0.0;
+        delay.state = DelayMode::Rebuilding;
+        let mut status = delay_status(&delay);
+        status.state = DelayMode::Dumped;
+        Ok(status)
+    }
+
+    pub fn end_delay(&mut self) -> Result<DelayStatus, EngineError> {
+        let mut delay = self
+            .delay_state
+            .lock()
+            .map_err(|_| EngineError::Pipeline("delay state lock is poisoned".to_owned()))?;
+        if delay.buffered_delay_seconds <= 0.05 {
+            return Err(EngineError::Conflict(
+                "End Delay is unavailable because no delay buffer exists".to_owned(),
+            ));
+        }
+        self.delay_queue.set_property("min-threshold-time", 0u64);
+        self.delay_pitch.set_property("tempo", 1.05f32);
+        delay.target_delay_seconds = 0;
+        delay.last_micro_skip = Instant::now();
+        delay.state = DelayMode::EndingDelay;
+        Ok(delay_status(&delay))
     }
 
     fn source_summary(&self, id: Uuid) -> Option<SourceSummary> {
@@ -722,7 +958,7 @@ impl OutputTransport {
             } => {
                 let format = pcm_format(*bit_depth, false)?;
                 Ok(format!(
-                    "queue ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate},channels={channels},format={format} ! alsasink device={} sync=false",
+                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate},channels={channels},format={format} ! alsasink device={} sync=true",
                     gst_quote(device)
                 ))
             }
@@ -739,7 +975,7 @@ impl OutputTransport {
                     RtpEncoding::L24 => ("L24", "S24BE"),
                 };
                 Ok(format!(
-                    "queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port} sync=false",
+                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port} sync=true",
                     gst_quote(host)
                 ))
             }
@@ -763,7 +999,7 @@ impl OutputTransport {
                     *pbkeylen,
                 )?;
                 Ok(format!(
-                    "queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! voaacenc bitrate={bitrate} ! aacparse ! mpegtsmux ! srtsink uri={} sync=false",
+                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! voaacenc bitrate={bitrate} ! aacparse ! mpegtsmux ! srtsink uri={} sync=true",
                     gst_quote(&uri)
                 ))
             }
@@ -924,6 +1160,64 @@ fn link_request_pad(
         return Err(EngineError::Pipeline(error.to_string()));
     }
     Ok(())
+}
+
+fn is_silent_pcm(pcm: &[u8]) -> bool {
+    let mut samples = pcm.chunks_exact(4);
+    pcm.len() >= 4
+        && samples.all(|sample| {
+            let value = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+            value.is_finite() && value.abs() <= 0.001
+        })
+}
+
+fn delay_status(delay: &DelayRuntime) -> DelayStatus {
+    let recovery_percent = if delay.configured_delay_seconds == 0 {
+        0.0
+    } else {
+        (delay.buffered_delay_seconds / f64::from(delay.configured_delay_seconds) * 100.0)
+            .clamp(0.0, 100.0)
+    };
+    DelayStatus {
+        configured_delay_seconds: delay.configured_delay_seconds,
+        buffered_delay_seconds: delay.buffered_delay_seconds,
+        recovery_percent,
+        state: delay.state,
+    }
+}
+
+fn start_delay_monitor(
+    queue: gst::Element,
+    pitch: gst::Element,
+    delay: Arc<Mutex<DelayRuntime>>,
+) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(50));
+        let buffered_ns = queue.property::<u64>("current-level-time");
+        let Ok(mut delay) = delay.lock() else {
+            tracing::error!("delay state lock is poisoned");
+            break;
+        };
+        delay.buffered_delay_seconds = buffered_ns as f64 / 1_000_000_000.0;
+        let target_seconds = f64::from(delay.target_delay_seconds);
+        match delay.state {
+            DelayMode::Rebuilding if delay.buffered_delay_seconds + 0.05 >= target_seconds => {
+                queue.set_property("min-threshold-time", target_seconds as u64 * 1_000_000_000);
+                pitch.set_property("tempo", 1.0f32);
+                delay.state = DelayMode::Normal;
+            }
+            DelayMode::EndingDelay if delay.buffered_delay_seconds <= target_seconds + 0.05 => {
+                queue.set_property("min-threshold-time", target_seconds as u64 * 1_000_000_000);
+                pitch.set_property("tempo", 1.0f32);
+                delay.state = if delay.target_delay_seconds == 0 {
+                    DelayMode::Live
+                } else {
+                    DelayMode::Normal
+                };
+            }
+            _ => {}
+        }
+    });
 }
 
 fn start_bus_monitor(pipeline: &gst::Pipeline, metrics: Arc<Mutex<LiveMetrics>>) {
@@ -1277,5 +1571,20 @@ mod tests {
             serde_json::json!({"mode": "caller"})["mode"],
             serde_json::Value::String("caller".to_owned())
         );
+    }
+
+    #[test]
+    fn silence_detection_only_drops_low_level_float_audio() {
+        let silent = [0.0f32, 0.0005, -0.0008]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let speech = [0.0f32, 0.02]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert!(is_silent_pcm(&silent));
+        assert!(!is_silent_pcm(&speech));
+        assert!(!is_silent_pcm(&[]));
     }
 }

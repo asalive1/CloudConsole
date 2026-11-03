@@ -38,6 +38,8 @@ pub enum ApiError {
     AudioEngine(#[from] reqwest::Error),
     #[error("Janus Gateway is unavailable: {0}")]
     Janus(String),
+    #[error("audio engine rejected the delay request: {0}")]
+    AudioEngineMessage(String),
 }
 
 impl IntoResponse for ApiError {
@@ -73,6 +75,13 @@ impl IntoResponse for ApiError {
                 (
                     StatusCode::BAD_GATEWAY,
                     "live audio service is unavailable".to_owned(),
+                )
+            }
+            ApiError::AudioEngineMessage(error) => {
+                tracing::error!(error = %error, "audio delay engine request failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "audio delay engine is unavailable".to_owned(),
                 )
             }
         };
@@ -121,6 +130,177 @@ pub async fn proxy_audio(
     response
         .body(Body::from(response_body))
         .map_err(|error| ApiError::InvalidRequest(error.to_string()))
+}
+
+#[derive(Deserialize)]
+pub struct ConfigureDelayRequest {
+    delay_seconds: u32,
+}
+
+pub async fn get_delay_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_delay_operator(&headers, &state).await?;
+    Ok(Json(
+        delay_engine_request(&state, reqwest::Method::GET, "", None).await?,
+    ))
+}
+
+pub async fn configure_delay(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ConfigureDelayRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_delay_operator(&headers, &state).await?;
+    if !(5..=60).contains(&request.delay_seconds) {
+        return Err(ApiError::InvalidRequest(
+            "delay_seconds must be between 5 and 60".to_owned(),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO station_delay_settings (station_id, delay_seconds) VALUES ($1, $2) ON CONFLICT (station_id) DO UPDATE SET delay_seconds = EXCLUDED.delay_seconds, updated_at = NOW()",
+    )
+    .bind(state.station_id)
+    .bind(request.delay_seconds as i16)
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(
+        delay_engine_request(
+            &state,
+            reqwest::Method::PATCH,
+            "/config",
+            Some(json!({ "delay_seconds": request.delay_seconds })),
+        )
+        .await?,
+    ))
+}
+
+pub async fn dump_delay(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_delay_operator(&headers, &state).await?;
+    Ok(Json(
+        delay_engine_request(&state, reqwest::Method::POST, "/dump", None).await?,
+    ))
+}
+
+pub async fn end_delay(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_delay_operator(&headers, &state).await?;
+    Ok(Json(
+        delay_engine_request(&state, reqwest::Method::POST, "/end", None).await?,
+    ))
+}
+
+async fn authorize_delay_operator(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<(), ApiError> {
+    if headers.contains_key("x-api-key") {
+        return authorize_station(headers, state);
+    }
+    let claims = authorize_participant(headers, state)?;
+    if !matches!(claims.role.as_str(), "host" | "co_host") {
+        return Err(ApiError::Unauthorized);
+    }
+    let session_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND station_id = $2 AND role = $3 AND status IN ('approved', 'connected', 'disconnected') AND expires_at > NOW())",
+    )
+    .bind(session_id)
+    .bind(state.station_id)
+    .bind(&claims.role)
+    .fetch_one(&state.pool)
+    .await?;
+    if !active {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(())
+}
+
+async fn delay_engine_request(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, ApiError> {
+    let url = format!("{}/delay{path}", state.audio_engine_url.trim_end_matches('/'));
+    let mut request = state.http_client.request(method, url);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    let response: Value = response.json().await.map_err(|error| {
+        ApiError::AudioEngineMessage(format!("invalid engine response: {error}"))
+    })?;
+    if status.is_success() {
+        return Ok(response);
+    }
+    let message = response
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("delay request failed")
+        .to_owned();
+    match status {
+        StatusCode::BAD_REQUEST => Err(ApiError::InvalidRequest(message)),
+        StatusCode::CONFLICT => Err(ApiError::Conflict(message)),
+        _ => Err(ApiError::AudioEngineMessage(message)),
+    }
+}
+
+pub async fn restore_delay_settings(state: &AppState) -> Result<(), ApiError> {
+    let client = state.http_client.clone();
+    let pool = state.pool.clone();
+    let station_id = state.station_id;
+    let url = format!("{}/delay/config", state.audio_engine_url.trim_end_matches('/'));
+    tokio::spawn(async move {
+        let mut retry_seconds = 1u64;
+        loop {
+            let delay_seconds: i16 = match sqlx::query_scalar(
+                "SELECT delay_seconds FROM station_delay_settings WHERE station_id = $1",
+            )
+            .bind(station_id)
+            .fetch_one(&pool)
+            .await
+            {
+                Ok(delay_seconds) => delay_seconds,
+                Err(error) => {
+                    tracing::error!(%error, "could not load persisted Program delay");
+                    tokio::time::sleep(std::time::Duration::from_secs(retry_seconds)).await;
+                    retry_seconds = (retry_seconds * 2).min(30);
+                    continue;
+                }
+            };
+            match client
+                .patch(&url)
+                .json(&json!({ "delay_seconds": delay_seconds }))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    tracing::info!(delay_seconds, "restored persisted Program delay");
+                    break;
+                }
+                Ok(response) => {
+                    tracing::warn!(
+                        status = %response.status(),
+                        "audio engine has not accepted persisted delay settings yet"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "audio engine is not available for delay restoration");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(retry_seconds)).await;
+            retry_seconds = (retry_seconds * 2).min(30);
+        }
+    });
+    Ok(())
 }
 
 #[derive(Serialize)]

@@ -3,7 +3,7 @@
   "info": {
     "title": "Cloud Console API",
     "version": "0.1.0",
-    "description": "Station-scoped API for operator access, guest approval, Janus Program/Cue audio, mixer state, WHIP/WHEP streaming, configuration, and audio routing."
+    "description": "Station-scoped API for operator access, guest approval, Janus Program/Cue audio, mixer state, profanity delay, WHIP/WHEP streaming, configuration, and audio routing."
   },
   "servers": [{ "url": "/api" }],
   "components": {
@@ -355,6 +355,16 @@
           "sources": { "type": "array", "items": { "$ref": "#/components/schemas/AudioSourceMetrics" } },
           "last_pipeline_error": { "type": ["string", "null"] }
         }
+      },
+      "DelayStatus": {
+        "type": "object",
+        "required": ["configured_delay_seconds", "buffered_delay_seconds", "recovery_percent", "state"],
+        "properties": {
+          "configured_delay_seconds": { "type": "integer", "minimum": 5, "maximum": 60 },
+          "buffered_delay_seconds": { "type": "number", "minimum": 0 },
+          "recovery_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+          "state": { "type": "string", "enum": ["normal", "dumped", "rebuilding", "ending_delay", "live"] }
+        }
       }
     }
   },
@@ -598,6 +608,52 @@
           "400": { "description": "Mixer settings are invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
           "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
           "404": { "description": "Channel is not active", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/delay": {
+      "get": {
+        "summary": "Read Program delay buffer and recovery status",
+        "security": [{ "StationApiKey": [] }, { "GuestBearer": [] }],
+        "responses": {
+          "200": { "description": "Current delay settings, buffered time, recovery meter, and state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DelayStatus" } } } },
+          "401": { "description": "Credential is invalid or does not have delay-control permission", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      },
+      "patch": {
+        "summary": "Set persistent Program delay duration",
+        "security": [{ "StationApiKey": [] }, { "GuestBearer": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["delay_seconds"], "properties": { "delay_seconds": { "type": "integer", "minimum": 5, "maximum": 60 } } } } } },
+        "responses": {
+          "200": { "description": "Delay setting updated", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DelayStatus" } } } },
+          "400": { "description": "Delay duration is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "401": { "description": "Credential is invalid or does not have delay-control permission", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/delay/dump": {
+      "post": {
+        "summary": "Discard the current Program delay buffer and rebuild it",
+        "security": [{ "StationApiKey": [] }, { "GuestBearer": [] }],
+        "responses": {
+          "200": { "description": "Delay buffer dumped; rebuilding begins", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DelayStatus" } } } },
+          "401": { "description": "Credential is invalid or does not have delay-control permission", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "409": { "description": "No delay buffer is available to dump", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/delay/end": {
+      "post": {
+        "summary": "Gradually return Program output to live audio",
+        "security": [{ "StationApiKey": [] }, { "GuestBearer": [] }],
+        "responses": {
+          "200": { "description": "End Delay transition started", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DelayStatus" } } } },
+          "401": { "description": "Credential is invalid or does not have delay-control permission", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "409": { "description": "No delay buffer is available to end", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
         }
       }
     },

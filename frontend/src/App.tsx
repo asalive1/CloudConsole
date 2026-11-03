@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import LiveAudioConnection from "./LiveAudioConnection";
+import DelayControls from "./DelayControls";
 
 type AuthResponse = {
   authenticated: boolean;
@@ -164,6 +165,7 @@ function StationApp() {
             <p>Station <code>{auth.station_id}</code></p>
             <button type="button" className="secondary" onClick={signOut}>Sign out</button>
           </div>
+          <DelayControls apiKey={apiKey} />
           <MixerConsole apiKey={apiKey} />
           {participant && (
             <LiveAudioConnection
