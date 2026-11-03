@@ -1,0 +1,54 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://cloud_console:cloud_console@postgres:5432/cloud_console}
+      STATION_API_KEY: ${STATION_API_KEY:-local-development-key-change-me}
+      GUEST_JWT_SECRET: ${GUEST_JWT_SECRET:-local-development-jwt-secret-change-me}
+      STATION_ID: ${STATION_ID:-00000000-0000-0000-0000-000000000001}
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    expose:
+      - "5173"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: cloud_console
+      POSTGRES_USER: cloud_console
+      POSTGRES_PASSWORD: cloud_console
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloud_console -d cloud_console"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

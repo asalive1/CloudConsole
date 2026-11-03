@@ -1,0 +1,11 @@
+BuildPrompts/
+BuildPrompts/**
+.env
+.env.*
+!.env.example
+target/
+node_modules/
+dist/
+coverage/
+.DS_Store
+Thumbs.db

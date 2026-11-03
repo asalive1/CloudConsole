@@ -1,0 +1,98 @@
+use std::{env, net::SocketAddr, str::FromStr};
+
+use axum::{routing::get, Router};
+use sqlx::postgres::PgPoolOptions;
+use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
+
+mod routes;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: sqlx::PgPool,
+    pub station_id: Uuid,
+    pub station_api_key: String,
+    pub guest_jwt_secret: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    let database_url = required_env("DATABASE_URL")?;
+    let station_api_key = required_env("STATION_API_KEY")?;
+    let guest_jwt_secret = required_env("GUEST_JWT_SECRET")?;
+    if guest_jwt_secret.len() < 32 {
+        return Err("GUEST_JWT_SECRET must contain at least 32 characters".into());
+    }
+
+    let station_id = Uuid::from_str(&required_env("STATION_ID")?)?;
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&database_url)
+        .await?;
+    sqlx::migrate!("../migrations").run(&pool).await?;
+    sqlx::query(
+        "INSERT INTO stations (id, name) VALUES ($1, 'Cloud Console') ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(station_id)
+    .execute(&pool)
+    .await?;
+
+    let state = AppState {
+        pool,
+        station_id,
+        station_api_key,
+        guest_jwt_secret,
+    };
+    let app = Router::new()
+        .route("/api/health", get(routes::health))
+        .route("/api/ready", get(routes::ready))
+        .route("/api/openapi.json", get(routes::openapi))
+        .route("/api/docs", get(routes::api_docs))
+        .route("/api/auth/login", axum::routing::post(routes::auth_login))
+        .route("/api/auth/validate", get(routes::auth_validate))
+        .route("/api/station/config", get(routes::station_config))
+        .route("/api/station/health", get(routes::station_health))
+        .route(
+            "/api/guest-links",
+            get(routes::list_guest_links).post(routes::create_guest_link),
+        )
+        .route(
+            "/api/guest-links/{id}",
+            axum::routing::delete(routes::invalidate_guest_link),
+        )
+        .route(
+            "/api/guest-links/{token}/sessions",
+            axum::routing::post(routes::create_guest_session),
+        )
+        .route("/api/users", get(routes::list_users))
+        .with_state(state)
+        .layer(
+            tower_http::trace::TraceLayer::new_for_http().make_span_with(
+                |request: &axum::http::Request<_>| {
+                    tracing::info_span!("http_request", method = %request.method())
+                },
+            ),
+        );
+
+    let address = env::var("BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8000".to_owned());
+    let listener = tokio::net::TcpListener::bind(address.parse::<SocketAddr>()?).await?;
+    tracing::info!("Cloud Console API listening on {}", listener.local_addr()?);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    env::var(name).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("required environment variable {name} is not set"),
+        )
+        .into()
+    })
+}

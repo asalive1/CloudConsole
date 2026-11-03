@@ -1,0 +1,6 @@
+.git
+.env
+BuildPrompts
+frontend/node_modules
+frontend/dist
+target

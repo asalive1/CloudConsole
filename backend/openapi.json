@@ -1,0 +1,218 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Cloud Console API",
+    "version": "0.1.0",
+    "description": "Station-scoped API for authentication, configuration, guest links, and operational health."
+  },
+  "servers": [{ "url": "/api" }],
+  "components": {
+    "securitySchemes": {
+      "StationApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      },
+      "GuestBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "required": ["error"],
+        "properties": { "error": { "type": "string" } }
+      },
+      "Health": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "type": "string", "enum": ["ok", "ready"] } }
+      },
+      "AuthValidation": {
+        "type": "object",
+        "required": ["authenticated", "station_id", "role"],
+        "properties": {
+          "authenticated": { "type": "boolean" },
+          "station_id": { "type": "string", "format": "uuid" },
+          "role": { "type": "string", "enum": ["station", "guest"] },
+          "status": { "type": ["string", "null"] }
+        }
+      },
+      "GuestLinkCreate": {
+        "type": "object",
+        "required": ["expires_at"],
+        "properties": {
+          "name": { "type": ["string", "null"] },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "GuestLink": {
+        "type": "object",
+        "required": ["id", "expires_at", "invalidated_at", "invitation_token"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": ["string", "null"] },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "invalidated_at": { "type": ["string", "null"], "format": "date-time" },
+          "invitation_token": { "type": ["string", "null"], "description": "Returned only when the link is created." }
+        }
+      },
+      "GuestSessionCreate": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 }
+        }
+      },
+      "GuestSession": {
+        "type": "object",
+        "required": ["session_id", "status", "access_token", "expires_at"],
+        "properties": {
+          "session_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "const": "pending" },
+          "access_token": { "type": "string", "description": "Guest-scoped JWT." },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "StationConfig": {
+        "type": "object",
+        "required": ["id", "name", "inputs", "outputs", "metadata", "delay", "routing_rules"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "inputs": { "type": "array", "items": { "type": "object" } },
+          "outputs": { "type": "array", "items": { "type": "object" } },
+          "metadata": { "type": "array", "items": { "type": "object" } },
+          "delay": { "type": "array", "items": { "type": "object" } },
+          "routing_rules": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "User": {
+        "type": "object",
+        "required": ["id", "name", "role", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "role": { "type": "string", "enum": ["host", "co_host", "guest", "admin"] },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Liveness check",
+        "responses": {
+          "200": { "description": "Service is running", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" } } } }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Readiness check",
+        "responses": {
+          "200": { "description": "Database is available", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" } } } },
+          "500": { "description": "Database is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "summary": "Validate station API key",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Key is valid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthValidation" } } } },
+          "401": { "description": "Key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/auth/validate": {
+      "get": {
+        "summary": "Validate station API key or guest session JWT",
+        "security": [{ "StationApiKey": [] }, { "GuestBearer": [] }],
+        "responses": {
+          "200": { "description": "Credential is valid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthValidation" } } } },
+          "401": { "description": "Credential is invalid or expired", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/station/config": {
+      "get": {
+        "summary": "Read station configuration",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Station configuration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StationConfig" } } } },
+          "401": { "description": "Key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/station/health": {
+      "get": {
+        "summary": "Read station health",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Station health", "content": { "application/json": { "schema": { "type": "object" } } } }
+        }
+      }
+    },
+    "/guest-links": {
+      "get": {
+        "summary": "List guest links",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Guest links", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/GuestLink" } } } } }
+        }
+      },
+      "post": {
+        "summary": "Create guest link",
+        "security": [{ "StationApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GuestLinkCreate" } } }
+        },
+        "responses": {
+          "201": { "description": "Guest link and one-time invitation token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GuestLink" } } } },
+          "400": { "description": "Invalid expiration time", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/guest-links/{id}": {
+      "delete": {
+        "summary": "Invalidate guest link",
+        "security": [{ "StationApiKey": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "204": { "description": "Link invalidated" },
+          "404": { "description": "Link not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/guest-links/{token}/sessions": {
+      "post": {
+        "summary": "Create pending guest session and scoped JWT",
+        "parameters": [{ "name": "token", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GuestSessionCreate" } } }
+        },
+        "responses": {
+          "201": { "description": "Pending guest session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GuestSession" } } } },
+          "401": { "description": "Link is invalid or expired", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "409": { "description": "Invitation link already has an active session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/users": {
+      "get": {
+        "summary": "List station users",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Station users", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/User" } } } } }
+        }
+      }
+    }
+  }
+}
