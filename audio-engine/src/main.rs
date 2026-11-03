@@ -157,9 +157,7 @@ async fn metrics(State(state): State<AppState>) -> Result<Json<AudioMetrics>, Ap
     Ok(Json(engine.metrics()?))
 }
 
-async fn delay_status(
-    State(state): State<AppState>,
-) -> Result<Json<DelayStatus>, ApiError> {
+async fn delay_status(State(state): State<AppState>) -> Result<Json<DelayStatus>, ApiError> {
     Ok(Json(state.engine.lock().await.delay_status()?))
 }
 

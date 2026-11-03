@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import LiveAudioConnection from "./LiveAudioConnection";
 import DelayControls from "./DelayControls";
+import AdminConsole from "./AdminConsole";
 
 type AuthResponse = {
   authenticated: boolean;
@@ -23,6 +24,7 @@ type GuestLink = {
   expires_at: string;
   invalidated_at: string | null;
   invitation_token: string | null;
+  status: "active" | "expired" | "invalidated";
 };
 
 type LiveSession = {
@@ -45,13 +47,21 @@ type MixerChannel = {
   revision: number;
 };
 
+type RoutingRule = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+};
+
 const API_BASE = "/api";
 const PARTICIPANT_KEY = "cloud-console-live-session";
 const STATION_KEY = "cloud-console-station-key";
 
 export default function App() {
   const invite = new URLSearchParams(window.location.search).get("invite");
-  return invite ? <GuestApp invitationToken={invite} /> : <StationApp />;
+  if (invite) return <GuestApp invitationToken={invite} />;
+  return window.location.pathname === "/admin" ? <AdminConsole /> : <StationApp />;
 }
 
 function StationApp() {
@@ -166,7 +176,9 @@ function StationApp() {
             <button type="button" className="secondary" onClick={signOut}>Sign out</button>
           </div>
           <DelayControls apiKey={apiKey} />
+          <AudioMeters apiKey={apiKey} />
           <MixerConsole apiKey={apiKey} />
+          <RoutingOverview apiKey={apiKey} />
           {participant && (
             <LiveAudioConnection
               participant={participant}
@@ -187,6 +199,7 @@ function StationApp() {
 
       <footer>
         <span>Cloud Console</span>
+        <a href="/admin">Station admin</a>
         <a href="/api/docs">API documentation</a>
       </footer>
     </main>
@@ -339,6 +352,148 @@ function MixerConsole({ apiKey }: { apiKey: string }) {
   );
 }
 
+type AudioMetrics = {
+  pipeline_state: string;
+  source_count: number;
+  output_count: number;
+  program_peak_dbfs: number[] | null;
+  sources: Array<{
+    id: string;
+    state: string;
+    peak_dbfs: number[] | null;
+  }>;
+  last_pipeline_error: string | null;
+};
+
+function AudioMeters({ apiKey }: { apiKey: string }) {
+  const [metrics, setMetrics] = useState<AudioMetrics | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void apiRequest<AudioMetrics>("/audio/metrics", {
+        headers: { "X-API-Key": apiKey },
+      })
+        .then((next) => {
+          if (active) {
+            setMetrics(next);
+            setError("");
+          }
+        })
+        .catch((cause: unknown) => {
+          if (active) setError(errorMessage(cause));
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [apiKey]);
+
+  return (
+    <section className="panel meter-panel" aria-labelledby="meters-title">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">ENGINE TELEMETRY</p>
+          <h3 id="meters-title">Audio meters</h3>
+        </div>
+        <span className="status-pill">{metrics?.pipeline_state ?? "Checking engine"}</span>
+      </div>
+      {metrics && (
+        <div className="meter-grid">
+          <Meter label="Program" values={metrics.program_peak_dbfs} />
+          {metrics.sources.map((source) => (
+            <Meter key={source.id} label={`Input ${source.id.slice(0, 8)}`} values={source.peak_dbfs} />
+          ))}
+          <p className="muted">{metrics.source_count} inputs · {metrics.output_count} outputs</p>
+        </div>
+      )}
+      {metrics?.last_pipeline_error && <p className="error">{metrics.last_pipeline_error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
+    </section>
+  );
+}
+
+function Meter({ label, values }: { label: string; values: number[] | null }) {
+  return (
+    <div className="audio-meter">
+      <span>{label}</span>
+      {values?.length ? (
+        values.map((value, index) => {
+          const width = Math.max(0, Math.min(100, ((value + 60) / 60) * 100));
+          return (
+            <div className="meter-track" key={index} aria-label={`${label} channel ${index + 1}: ${value.toFixed(1)} dBFS`}>
+              <span style={{ width: `${width}%` }} />
+            </div>
+          );
+        })
+      ) : (
+        <small className="muted">No level data</small>
+      )}
+    </div>
+  );
+}
+
+function RoutingOverview({ apiKey }: { apiKey: string }) {
+  const [rules, setRules] = useState<RoutingRule[]>([]);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void apiRequest<RoutingRule[]>("/station/config/routes", {
+        headers: { "X-API-Key": apiKey },
+      })
+        .then((next) => {
+          if (active) {
+            setRules(next);
+            setError("");
+          }
+        })
+        .catch((cause: unknown) => {
+          if (active) setError(errorMessage(cause));
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [apiKey]);
+
+  return (
+    <section className="panel routing-panel" aria-labelledby="routing-title">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">ROUTING</p>
+          <h3 id="routing-title">Saved routing rules</h3>
+        </div>
+        <a className="secondary-link" href="/admin">Manage in Admin</a>
+      </div>
+      {error ? (
+        <p className="error" role="alert">{error}</p>
+      ) : rules.length ? (
+        <ul className="item-list">
+          {rules.map((rule) => (
+            <li key={rule.id}>
+              <span>{rule.name}</span>
+              <span className={`status-pill ${rule.enabled ? "active" : ""}`}>
+                {rule.enabled ? "Enabled" : "Disabled"}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">No routing rules are configured.</p>
+      )}
+    </section>
+  );
+}
+
 function StationWorkspace({
   apiKey,
   onParticipant,
@@ -355,17 +510,20 @@ function StationWorkspace({
   const [links, setLinks] = useState<GuestLink[]>([]);
   const [newLink, setNewLink] = useState<GuestLink | null>(null);
   const [sessions, setSessions] = useState<LiveSession[]>([]);
+  const [channels, setChannels] = useState<MixerChannel[]>([]);
   const [busy, setBusy] = useState(false);
 
   const operatorHeaders: HeadersInit = { "X-API-Key": apiKey };
 
   async function refresh() {
-    const [guestLinks, liveSessions] = await Promise.all([
+    const [guestLinks, liveSessions, mixerChannels] = await Promise.all([
       apiRequest<GuestLink[]>("/guest-links", { headers: operatorHeaders }),
       apiRequest<LiveSession[]>("/live-sessions", { headers: operatorHeaders }),
+      apiRequest<MixerChannel[]>("/mixer/channels", { headers: operatorHeaders }),
     ]);
     setLinks(guestLinks);
     setSessions(liveSessions);
+    setChannels(mixerChannels);
   }
 
   useEffect(() => {
@@ -374,11 +532,13 @@ function StationWorkspace({
       void Promise.all([
         apiRequest<GuestLink[]>("/guest-links", { headers: operatorHeaders }),
         apiRequest<LiveSession[]>("/live-sessions", { headers: operatorHeaders }),
+        apiRequest<MixerChannel[]>("/mixer/channels", { headers: operatorHeaders }),
       ])
-        .then(([guestLinks, liveSessions]) => {
+        .then(([guestLinks, liveSessions, mixerChannels]) => {
           if (active) {
             setLinks(guestLinks);
             setSessions(liveSessions);
+            setChannels(mixerChannels);
           }
         })
         .catch((cause: unknown) => {
@@ -441,6 +601,40 @@ function StationWorkspace({
     onError("");
     try {
       await apiRequest(`/live-sessions/${id}/${decision}`, {
+        method: "POST",
+        headers: operatorHeaders,
+      });
+      await refresh();
+    } catch (cause) {
+      onError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function muteGuest(sessionId: string) {
+    const channel = channels.find((item) => item.channel_id === sessionId);
+    setBusy(true);
+    onError("");
+    try {
+      await apiRequest(`/mixer/channels/${sessionId}`, {
+        method: "PATCH",
+        headers: { ...operatorHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ muted: !channel?.muted }),
+      });
+      await refresh();
+    } catch (cause) {
+      onError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectGuest(sessionId: string) {
+    setBusy(true);
+    onError("");
+    try {
+      await apiRequest(`/live-sessions/${sessionId}/disconnect`, {
         method: "POST",
         headers: operatorHeaders,
       });
@@ -548,7 +742,7 @@ function StationWorkspace({
             <li key={link.id}>
               <div>
                 <strong>{link.name || "Guest invitation"}</strong>
-                <span>{link.invalidated_at ? "Invalidated" : `Expires ${formatDate(link.expires_at)}`}</span>
+                <span>{guestLinkStatus(link.status, link.expires_at)}</span>
               </div>
               {link.invitation_token ? (
                 <button type="button" className="secondary" onClick={() => void copyInvitation(link)}>
@@ -594,6 +788,26 @@ function StationWorkspace({
                     </button>
                   </div>
                 )}
+                {session.role === "guest" && ["approved", "connected", "disconnected"].includes(session.status) && (
+                  <div className="inline-actions">
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void muteGuest(session.id)}
+                    >
+                      {channels.find((channel) => channel.channel_id === session.id)?.muted ? "Unmute" : "Mute"}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void disconnectGuest(session.id)}
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -625,14 +839,29 @@ function GuestApp({ invitationToken }: { invitationToken: string }) {
         .then((response) => {
           if (active) {
             setStatus(response.status);
-            if (response.status !== "pending" && timer !== null) {
+            if (["rejected", "expired", "timed_out"].includes(response.status)) {
+              setInStudio(false);
+            }
+            if (["rejected", "expired", "timed_out"].includes(response.status) && timer !== null) {
               window.clearInterval(timer);
               timer = null;
             }
           }
         })
         .catch((cause: unknown) => {
-          if (active) setError(errorMessage(cause));
+          if (active) {
+            const message = errorMessage(cause);
+            if (message === "unauthorized") {
+              setStatus("expired");
+              setInStudio(false);
+              if (timer !== null) {
+                window.clearInterval(timer);
+                timer = null;
+              }
+            } else {
+              setError(message);
+            }
+          }
         });
     };
     check();
@@ -660,7 +889,13 @@ function GuestApp({ invitationToken }: { invitationToken: string }) {
       setStatus(response.status);
       sessionStorage.setItem(storageKey, JSON.stringify(response));
     } catch (cause) {
-      setError(errorMessage(cause));
+      const message = errorMessage(cause);
+      if (message === "unauthorized") {
+        setStatus("expired");
+        setError("This invitation is expired or unavailable. Ask the host for a new link.");
+      } else {
+        setError(message);
+      }
     } finally {
       setBusy(false);
     }
@@ -689,7 +924,7 @@ function GuestApp({ invitationToken }: { invitationToken: string }) {
         <p className="intro">Enter your name and request to connect. Your microphone stays off until the host approves you.</p>
       </section>
 
-      {inStudio && participant ? (
+      {inStudio && participant && !["rejected", "expired", "timed_out"].includes(status) ? (
         <LiveAudioConnection
           participant={participant}
           onLeave={() => {
@@ -700,6 +935,17 @@ function GuestApp({ invitationToken }: { invitationToken: string }) {
             sessionStorage.setItem(storageKey, JSON.stringify(next));
           }}
         />
+      ) : status === "expired" || status === "timed_out" ? (
+        <section className="panel">
+          <p className="eyebrow">INVITATION STATUS</p>
+          <h3>{status === "timed_out" ? "Request timed out" : "Invitation expired"}</h3>
+          <p className="muted">
+            {status === "timed_out"
+              ? "The host did not approve this request in time. Ask for a new invitation."
+              : "Ask the host for a new invitation link."}
+          </p>
+          {error && <p className="error" role="alert">{error}</p>}
+        </section>
       ) : !participant ? (
         <section className="panel" aria-labelledby="guest-connect-title">
           <div className="panel-heading">
@@ -735,11 +981,6 @@ function GuestApp({ invitationToken }: { invitationToken: string }) {
           <h3>Connection Rejected</h3>
           <p className="muted">You may request access again while this invitation link is valid.</p>
           <button type="button" onClick={reconnectWithSameLink}>Request access again</button>
-        </section>
-      ) : status === "expired" ? (
-        <section className="panel">
-          <h3>Invitation expired</h3>
-          <p className="muted">Ask the host for a new invitation link.</p>
         </section>
       ) : (
         <section className="panel">
@@ -794,6 +1035,12 @@ function defaultExpiry(): string {
 
 function formatDate(value: string): string {
   return new Date(value).toLocaleString();
+}
+
+function guestLinkStatus(status: GuestLink["status"], expiresAt: string): string {
+  if (status === "invalidated") return "Invalidated";
+  if (status === "expired") return "Expired";
+  return `Active · expires ${formatDate(expiresAt)}`;
 }
 
 function errorMessage(error: unknown): string {

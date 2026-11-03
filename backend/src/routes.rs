@@ -196,10 +196,7 @@ pub async fn end_delay(
     ))
 }
 
-async fn authorize_delay_operator(
-    headers: &HeaderMap,
-    state: &AppState,
-) -> Result<(), ApiError> {
+async fn authorize_delay_operator(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
     if headers.contains_key("x-api-key") {
         return authorize_station(headers, state);
     }
@@ -228,7 +225,10 @@ async fn delay_engine_request(
     path: &str,
     body: Option<Value>,
 ) -> Result<Value, ApiError> {
-    let url = format!("{}/delay{path}", state.audio_engine_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/delay{path}",
+        state.audio_engine_url.trim_end_matches('/')
+    );
     let mut request = state.http_client.request(method, url);
     if let Some(body) = body {
         request = request.json(&body);
@@ -257,7 +257,10 @@ pub async fn restore_delay_settings(state: &AppState) -> Result<(), ApiError> {
     let client = state.http_client.clone();
     let pool = state.pool.clone();
     let station_id = state.station_id;
-    let url = format!("{}/delay/config", state.audio_engine_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/delay/config",
+        state.audio_engine_url.trim_end_matches('/')
+    );
     tokio::spawn(async move {
         let mut retry_seconds = 1u64;
         loop {
@@ -421,6 +424,309 @@ pub async fn station_config(
     }))
 }
 
+#[derive(Deserialize)]
+pub struct StationSettingsRequest {
+    name: String,
+}
+
+pub async fn update_station_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<StationSettingsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_station(&headers, &state)?;
+    let name = request.name.trim();
+    if name.is_empty() || name.len() > 100 {
+        return Err(ApiError::InvalidRequest(
+            "station name must contain between 1 and 100 characters".to_owned(),
+        ));
+    }
+    let row = sqlx::query(
+        "UPDATE stations SET name = $1, updated_at = NOW() WHERE id = $2 RETURNING id, name",
+    )
+    .bind(name)
+    .bind(state.station_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(Json(json!({
+        "id": row.get::<Uuid, _>("id"),
+        "name": row.get::<String, _>("name")
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct StationResourceRequest {
+    name: Option<String>,
+    resource_type: Option<String>,
+    direction: Option<String>,
+    format: Option<String>,
+    enabled: Option<bool>,
+    config: Option<Value>,
+}
+
+fn station_resource_table(kind: &str) -> Result<&'static str, ApiError> {
+    match kind {
+        "inputs" => Ok("inputs"),
+        "outputs" => Ok("outputs"),
+        "metadata" => Ok("metadata_configs"),
+        "routes" => Ok("routing_rules"),
+        _ => Err(ApiError::NotFound),
+    }
+}
+
+fn validate_setting_text(value: &str, field: &str, max_length: usize) -> Result<(), ApiError> {
+    if value.trim().is_empty() || value.len() > max_length {
+        return Err(ApiError::InvalidRequest(format!(
+            "{field} must contain between 1 and {max_length} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_station_resource(request: &StationResourceRequest, kind: &str) -> Result<(), ApiError> {
+    if let Some(name) = request.name.as_deref() {
+        validate_setting_text(name, "name", 100)?;
+    }
+    if let Some(resource_type) = request.resource_type.as_deref() {
+        validate_setting_text(resource_type, "resource_type", 40)?;
+    }
+    if let Some(direction) = request.direction.as_deref() {
+        if !matches!(direction, "input" | "output") {
+            return Err(ApiError::InvalidRequest(
+                "direction must be input or output".to_owned(),
+            ));
+        }
+    }
+    if let Some(format) = request.format.as_deref() {
+        validate_setting_text(format, "format", 40)?;
+    }
+    if request
+        .config
+        .as_ref()
+        .is_some_and(|config| !config.is_object())
+    {
+        return Err(ApiError::InvalidRequest(
+            "config must be a JSON object".to_owned(),
+        ));
+    }
+    if kind == "metadata" && request.direction.is_some() != request.format.is_some() {
+        return Err(ApiError::InvalidRequest(
+            "metadata direction and format must be provided together".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn list_station_resources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(kind): Path<String>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    authorize_station(&headers, &state)?;
+    let table = station_resource_table(&kind)?;
+    Ok(Json(
+        rows_as_json(&state.pool, table, state.station_id).await?,
+    ))
+}
+
+pub async fn create_station_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(kind): Path<String>,
+    Json(request): Json<StationResourceRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    authorize_station(&headers, &state)?;
+    station_resource_table(&kind)?;
+    validate_station_resource(&request, &kind)?;
+    let name = request
+        .name
+        .as_deref()
+        .ok_or_else(|| ApiError::InvalidRequest("name is required".to_owned()))?
+        .trim();
+    let config = sqlx::types::Json(request.config.unwrap_or_else(|| json!({})));
+    let id = Uuid::new_v4();
+    match kind.as_str() {
+        "inputs" => {
+            let resource_type = request
+                .resource_type
+                .as_deref()
+                .ok_or_else(|| ApiError::InvalidRequest("resource_type is required".to_owned()))?;
+            sqlx::query(
+                "INSERT INTO inputs (id, station_id, name, source_type, enabled, config) VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(id)
+            .bind(state.station_id)
+            .bind(name)
+            .bind(resource_type.trim())
+            .bind(request.enabled.unwrap_or(true))
+            .bind(config)
+            .execute(&state.pool)
+            .await?;
+        }
+        "outputs" => {
+            let resource_type = request
+                .resource_type
+                .as_deref()
+                .ok_or_else(|| ApiError::InvalidRequest("resource_type is required".to_owned()))?;
+            sqlx::query(
+                "INSERT INTO outputs (id, station_id, name, output_type, enabled, config) VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(id)
+            .bind(state.station_id)
+            .bind(name)
+            .bind(resource_type.trim())
+            .bind(request.enabled.unwrap_or(true))
+            .bind(config)
+            .execute(&state.pool)
+            .await?;
+        }
+        "metadata" => {
+            let direction = request
+                .direction
+                .as_deref()
+                .ok_or_else(|| ApiError::InvalidRequest("direction is required".to_owned()))?;
+            let format = request
+                .format
+                .as_deref()
+                .ok_or_else(|| ApiError::InvalidRequest("format is required".to_owned()))?;
+            sqlx::query(
+                "INSERT INTO metadata_configs (id, station_id, name, direction, format, enabled, config) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(id)
+            .bind(state.station_id)
+            .bind(name)
+            .bind(direction)
+            .bind(format.trim())
+            .bind(request.enabled.unwrap_or(true))
+            .bind(config)
+            .execute(&state.pool)
+            .await?;
+        }
+        "routes" => {
+            sqlx::query(
+                "INSERT INTO routing_rules (id, station_id, name, enabled, config) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(id)
+            .bind(state.station_id)
+            .bind(name)
+            .bind(request.enabled.unwrap_or(true))
+            .bind(config)
+            .execute(&state.pool)
+            .await?;
+        }
+        _ => return Err(ApiError::NotFound),
+    }
+    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+pub async fn update_station_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((kind, id)): Path<(String, Uuid)>,
+    Json(request): Json<StationResourceRequest>,
+) -> Result<StatusCode, ApiError> {
+    authorize_station(&headers, &state)?;
+    station_resource_table(&kind)?;
+    validate_station_resource(&request, &kind)?;
+    if request.name.is_none()
+        && request.resource_type.is_none()
+        && request.direction.is_none()
+        && request.format.is_none()
+        && request.enabled.is_none()
+        && request.config.is_none()
+    {
+        return Err(ApiError::InvalidRequest(
+            "at least one station resource setting must be provided".to_owned(),
+        ));
+    }
+    let config = request.config.map(sqlx::types::Json);
+    let result = match kind.as_str() {
+        "inputs" => {
+            sqlx::query(
+                "UPDATE inputs SET name = COALESCE($1, name), source_type = COALESCE($2, source_type), enabled = COALESCE($3, enabled), config = COALESCE($4, config), updated_at = NOW() WHERE id = $5 AND station_id = $6",
+            )
+            .bind(request.name.map(|value| value.trim().to_owned()))
+            .bind(request.resource_type.map(|value| value.trim().to_owned()))
+            .bind(request.enabled)
+            .bind(config)
+            .bind(id)
+            .bind(state.station_id)
+            .execute(&state.pool)
+            .await?
+        }
+        "outputs" => {
+            sqlx::query(
+                "UPDATE outputs SET name = COALESCE($1, name), output_type = COALESCE($2, output_type), enabled = COALESCE($3, enabled), config = COALESCE($4, config), updated_at = NOW() WHERE id = $5 AND station_id = $6",
+            )
+            .bind(request.name.map(|value| value.trim().to_owned()))
+            .bind(request.resource_type.map(|value| value.trim().to_owned()))
+            .bind(request.enabled)
+            .bind(config)
+            .bind(id)
+            .bind(state.station_id)
+            .execute(&state.pool)
+            .await?
+        }
+        "metadata" => {
+            sqlx::query(
+                "UPDATE metadata_configs SET name = COALESCE($1, name), direction = COALESCE($2, direction), format = COALESCE($3, format), enabled = COALESCE($4, enabled), config = COALESCE($5, config), updated_at = NOW() WHERE id = $6 AND station_id = $7",
+            )
+            .bind(request.name.map(|value| value.trim().to_owned()))
+            .bind(request.direction)
+            .bind(request.format.map(|value| value.trim().to_owned()))
+            .bind(request.enabled)
+            .bind(config)
+            .bind(id)
+            .bind(state.station_id)
+            .execute(&state.pool)
+            .await?
+        }
+        "routes" => {
+            sqlx::query(
+                "UPDATE routing_rules SET name = COALESCE($1, name), enabled = COALESCE($2, enabled), config = COALESCE($3, config), updated_at = NOW() WHERE id = $4 AND station_id = $5",
+            )
+            .bind(request.name.map(|value| value.trim().to_owned()))
+            .bind(request.enabled)
+            .bind(config)
+            .bind(id)
+            .bind(state.station_id)
+            .execute(&state.pool)
+            .await?
+        }
+        _ => return Err(ApiError::NotFound),
+    };
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn delete_station_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((kind, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    authorize_station(&headers, &state)?;
+    let table = station_resource_table(&kind)?;
+    let query = match table {
+        "inputs" => "DELETE FROM inputs WHERE id = $1 AND station_id = $2",
+        "outputs" => "DELETE FROM outputs WHERE id = $1 AND station_id = $2",
+        "metadata_configs" => "DELETE FROM metadata_configs WHERE id = $1 AND station_id = $2",
+        "routing_rules" => "DELETE FROM routing_rules WHERE id = $1 AND station_id = $2",
+        _ => return Err(ApiError::NotFound),
+    };
+    let result = sqlx::query(query)
+        .bind(id)
+        .bind(state.station_id)
+        .execute(&state.pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn station_health(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -476,6 +782,7 @@ pub struct GuestLinkResponse {
     expires_at: DateTime<Utc>,
     invalidated_at: Option<DateTime<Utc>>,
     invitation_token: Option<String>,
+    status: String,
 }
 
 pub async fn list_guest_links(
@@ -484,7 +791,7 @@ pub async fn list_guest_links(
 ) -> Result<Json<Vec<GuestLinkResponse>>, ApiError> {
     authorize_station(&headers, &state)?;
     let rows = sqlx::query(
-        "SELECT id, name, expires_at, invalidated_at FROM guest_links WHERE station_id = $1 ORDER BY created_at DESC",
+        "SELECT id, name, expires_at, invalidated_at, CASE WHEN invalidated_at IS NOT NULL THEN 'invalidated' WHEN expires_at <= NOW() THEN 'expired' ELSE 'active' END AS status FROM guest_links WHERE station_id = $1 ORDER BY created_at DESC",
     )
     .bind(state.station_id)
     .fetch_all(&state.pool)
@@ -497,6 +804,7 @@ pub async fn list_guest_links(
                 expires_at: row.get("expires_at"),
                 invalidated_at: row.get("invalidated_at"),
                 invitation_token: None,
+                status: row.get("status"),
             })
             .collect(),
     ))
@@ -533,6 +841,7 @@ pub async fn create_guest_link(
             expires_at: request.expires_at,
             invalidated_at: None,
             invitation_token: Some(token),
+            status: "active".to_owned(),
         }),
     ))
 }
@@ -543,16 +852,25 @@ pub async fn invalidate_guest_link(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     authorize_station(&headers, &state)?;
+    let mut transaction = state.pool.begin().await?;
     let result = sqlx::query(
         "UPDATE guest_links SET invalidated_at = COALESCE(invalidated_at, NOW()) WHERE id = $1 AND station_id = $2",
     )
     .bind(id)
     .bind(state.station_id)
-    .execute(&state.pool)
+    .execute(&mut *transaction)
     .await?;
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    sqlx::query(
+        "UPDATE sessions SET status = 'expired', approval_expires_at = NULL, updated_at = NOW() WHERE station_id = $1 AND guest_link_id = $2 AND status IN ('pending', 'approved', 'connected', 'disconnected', 'timed_out')",
+    )
+    .bind(state.station_id)
+    .bind(id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -837,6 +1155,47 @@ pub async fn reject_guest_session(
     }))
 }
 
+pub async fn disconnect_guest_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<LiveSessionResponse>, ApiError> {
+    authorize_station(&headers, &state)?;
+    expire_stale_sessions(&state).await?;
+    let mut transaction = state.pool.begin().await?;
+    let row = sqlx::query(
+        "UPDATE sessions SET status = 'rejected', approval_expires_at = NULL, updated_at = NOW() WHERE id = $1 AND station_id = $2 AND role = 'guest' AND status IN ('approved', 'connected', 'disconnected') RETURNING id, display_name, role, status, expires_at",
+    )
+    .bind(id)
+    .bind(state.station_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    let channel = sqlx::query(
+        "INSERT INTO mixer_channels (station_id, channel_id, muted) VALUES ($1, $2, TRUE) ON CONFLICT (station_id, channel_id) DO UPDATE SET muted = TRUE, revision = mixer_channels.revision + 1, updated_at = NOW() RETURNING channel_id, fader, is_on, cue_enabled, muted, revision",
+    )
+    .bind(state.station_id)
+    .bind(id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let _ = state.mixer_updates.send(mixer_channel_value(
+        channel.get("channel_id"),
+        channel.get("fader"),
+        channel.get("is_on"),
+        channel.get("cue_enabled"),
+        channel.get("muted"),
+        channel.get("revision"),
+    ));
+    Ok(Json(LiveSessionResponse {
+        id: row.get("id"),
+        display_name: row.get("display_name"),
+        role: row.get("role"),
+        status: row.get("status"),
+        expires_at: row.get("expires_at"),
+    }))
+}
+
 pub async fn get_guest_session(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -848,7 +1207,7 @@ pub async fn get_guest_session(
     }
     expire_stale_sessions(&state).await?;
     let row = sqlx::query(
-        "SELECT s.id, s.display_name, s.role, s.status, s.expires_at FROM sessions s JOIN guest_links gl ON gl.id = s.guest_link_id AND gl.station_id = s.station_id WHERE s.id = $1 AND s.station_id = $2 AND gl.invalidated_at IS NULL AND gl.expires_at > NOW()",
+        "SELECT s.id, s.display_name, s.role, s.status, s.expires_at FROM sessions s JOIN guest_links gl ON gl.id = s.guest_link_id AND gl.station_id = s.station_id WHERE s.id = $1 AND s.station_id = $2",
     )
     .bind(id)
     .bind(state.station_id)
@@ -1212,6 +1571,7 @@ pub async fn update_live_connection(
     if Uuid::parse_str(&claims.sub).ok() != Some(id) {
         return Err(ApiError::Unauthorized);
     }
+    expire_stale_sessions(&state).await?;
     let status = match request.state.as_str() {
         "connected" => "connected",
         "disconnected" => "disconnected",
@@ -1242,7 +1602,13 @@ pub async fn update_live_connection(
 
 async fn expire_stale_sessions(state: &AppState) -> Result<(), ApiError> {
     sqlx::query(
-        "UPDATE sessions SET status = 'expired', approval_expires_at = NULL, updated_at = NOW() WHERE station_id = $1 AND status IN ('pending', 'approved', 'connected', 'disconnected') AND ((status = 'pending' AND approval_expires_at <= NOW()) OR expires_at <= NOW())",
+        "UPDATE sessions SET status = 'timed_out', approval_expires_at = NULL, updated_at = NOW() WHERE station_id = $1 AND status = 'pending' AND approval_expires_at <= NOW() AND expires_at > NOW()",
+    )
+    .bind(state.station_id)
+    .execute(&state.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE sessions s SET status = 'expired', approval_expires_at = NULL, updated_at = NOW() WHERE s.station_id = $1 AND s.status IN ('pending', 'approved', 'connected', 'disconnected', 'timed_out') AND (s.expires_at <= NOW() OR EXISTS (SELECT 1 FROM guest_links gl WHERE gl.id = s.guest_link_id AND gl.station_id = s.station_id AND (gl.invalidated_at IS NOT NULL OR gl.expires_at <= NOW())))",
     )
     .bind(state.station_id)
     .execute(&state.pool)

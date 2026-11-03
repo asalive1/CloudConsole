@@ -638,7 +638,6 @@ impl AudioEngine {
                     packets_lost,
                     configured_latency_ms: source.input.configured_latency_ms(),
                 }
-
             })
             .collect();
         Ok(AudioMetrics {
@@ -703,9 +702,7 @@ impl AudioEngine {
                 "DUMP is unavailable because no delay buffer exists".to_owned(),
             ));
         }
-        if !self
-            .delay_queue
-            .send_event(gst::event::FlushStart::new())
+        if !self.delay_queue.send_event(gst::event::FlushStart::new())
             || !self
                 .delay_queue
                 .send_event(gst::event::FlushStop::new(true))
@@ -1186,11 +1183,7 @@ fn delay_status(delay: &DelayRuntime) -> DelayStatus {
     }
 }
 
-fn start_delay_monitor(
-    queue: gst::Element,
-    pitch: gst::Element,
-    delay: Arc<Mutex<DelayRuntime>>,
-) {
+fn start_delay_monitor(queue: gst::Element, pitch: gst::Element, delay: Arc<Mutex<DelayRuntime>>) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_millis(50));
         let buffered_ns = queue.property::<u64>("current-level-time");

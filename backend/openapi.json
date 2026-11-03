@@ -73,7 +73,7 @@
           "session_id": { "type": "string", "format": "uuid" },
           "display_name": { "type": "string" },
           "role": { "type": "string", "const": "guest" },
-          "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected"] },
+          "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected", "rejected", "timed_out", "expired"] },
           "access_token": { "type": "string", "description": "Guest-scoped JWT." },
           "expires_at": { "type": "string", "format": "date-time" }
         }
@@ -93,7 +93,7 @@
           "id": { "type": "string", "format": "uuid" },
           "display_name": { "type": "string" },
           "role": { "type": "string", "enum": ["guest", "host", "co_host"] },
-          "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected", "rejected", "expired"] },
+          "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected", "rejected", "timed_out", "expired"] },
           "expires_at": { "type": "string", "format": "date-time" }
         }
       },
@@ -116,7 +116,7 @@
           "session_id": { "type": "string", "format": "uuid" },
           "display_name": { "type": "string" },
           "role": { "type": "string", "const": "guest" },
-          "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected", "rejected", "expired"] },
+          "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected", "rejected", "timed_out", "expired"] },
           "expires_at": { "type": "string", "format": "date-time" }
         }
       },
@@ -150,6 +150,31 @@
           "delay": { "type": "array", "items": { "type": "object" } },
           "routing_rules": { "type": "array", "items": { "type": "object" } }
         }
+      },
+      "StationSettingsUpdate": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 }
+        }
+      },
+      "StationResourceUpdate": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "resource_type": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "direction": { "type": "string", "enum": ["input", "output"] },
+          "format": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "enabled": { "type": "boolean" },
+          "config": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "StationResourceCreate": {
+        "description": "name is always required; inputs and outputs also require resource_type; metadata requires direction and format.",
+        "allOf": [
+          { "$ref": "#/components/schemas/StationResourceUpdate" },
+          { "type": "object", "required": ["name"] }
+        ]
       },
       "User": {
         "type": "object",
@@ -414,6 +439,68 @@
           "200": { "description": "Station configuration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StationConfig" } } } },
           "401": { "description": "Key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
         }
+      },
+      "patch": {
+        "summary": "Update station settings",
+        "security": [{ "StationApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StationSettingsUpdate" } } }
+        },
+        "responses": {
+          "200": { "description": "Updated station settings" },
+          "400": { "description": "Invalid station name", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/station/config/{kind}": {
+      "parameters": [{ "name": "kind", "in": "path", "required": true, "schema": { "type": "string", "enum": ["inputs", "outputs", "metadata", "routes"] } }],
+      "get": {
+        "summary": "List station resources of a configuration kind",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Station resources", "content": { "application/json": { "schema": { "type": "array", "items": { "type": "object" } } } } },
+          "404": { "description": "Unsupported resource kind", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      },
+      "post": {
+        "summary": "Create a station resource",
+        "security": [{ "StationApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StationResourceCreate" } } }
+        },
+        "responses": {
+          "201": { "description": "Created resource", "content": { "application/json": { "schema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string", "format": "uuid" } } } } } },
+          "400": { "description": "Invalid or incomplete resource", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/station/config/{kind}/{id}": {
+      "parameters": [
+        { "name": "kind", "in": "path", "required": true, "schema": { "type": "string", "enum": ["inputs", "outputs", "metadata", "routes"] } },
+        { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "patch": {
+        "summary": "Update a station resource",
+        "security": [{ "StationApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StationResourceUpdate" } } }
+        },
+        "responses": {
+          "204": { "description": "Resource updated" },
+          "400": { "description": "Invalid or empty update", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Resource not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      },
+      "delete": {
+        "summary": "Delete a station resource",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "204": { "description": "Resource deleted" },
+          "404": { "description": "Resource not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
       }
     },
     "/station/health": {
@@ -513,6 +600,17 @@
         "responses": {
           "200": { "description": "Guest rejected", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LiveSession" } } } },
           "404": { "description": "No pending guest session found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/live-sessions/{id}/disconnect": {
+      "post": {
+        "summary": "Disconnect an approved or connected guest",
+        "security": [{ "StationApiKey": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "Guest disconnected and mixer channel muted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LiveSession" } } } },
+          "404": { "description": "Guest session is not active", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
         }
       }
     },

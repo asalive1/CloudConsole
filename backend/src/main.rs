@@ -123,7 +123,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/docs", get(routes::api_docs))
         .route("/api/auth/login", axum::routing::post(routes::auth_login))
         .route("/api/auth/validate", get(routes::auth_validate))
-        .route("/api/station/config", get(routes::station_config))
+        .route(
+            "/api/station/config",
+            get(routes::station_config).patch(routes::update_station_settings),
+        )
+        .route(
+            "/api/station/config/{kind}",
+            get(routes::list_station_resources).post(routes::create_station_resource),
+        )
+        .route(
+            "/api/station/config/{kind}/{id}",
+            axum::routing::patch(routes::update_station_resource)
+                .delete(routes::delete_station_resource),
+        )
         .route("/api/station/health", get(routes::station_health))
         .route(
             "/api/guest-links",
@@ -148,6 +160,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/live-sessions/{id}/reject",
             axum::routing::post(routes::reject_guest_session),
+        )
+        .route(
+            "/api/live-sessions/{id}/disconnect",
+            axum::routing::post(routes::disconnect_guest_session),
         )
         .route(
             "/api/live-sessions/{id}/connection",
