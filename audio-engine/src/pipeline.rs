@@ -1160,9 +1160,9 @@ fn link_request_pad(
 }
 
 fn is_silent_pcm(pcm: &[u8]) -> bool {
-    let mut samples = pcm.chunks_exact(4);
-    pcm.len() >= 4
-        && samples.all(|sample| {
+    let (samples, _) = pcm.as_chunks::<4>();
+    !samples.is_empty()
+        && samples.iter().all(|sample| {
             let value = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
             value.is_finite() && value.abs() <= 0.001
         })
@@ -1579,5 +1579,6 @@ mod tests {
         assert!(is_silent_pcm(&silent));
         assert!(!is_silent_pcm(&speech));
         assert!(!is_silent_pcm(&[]));
+        assert!(is_silent_pcm(&[silent.as_slice(), &[1]].concat()));
     }
 }
