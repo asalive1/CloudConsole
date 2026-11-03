@@ -441,12 +441,7 @@ pub async fn create_guest_session(
                 display_name,
                 role: "guest".to_owned(),
                 status,
-                access_token: participant_token(
-                    &state,
-                    session_id,
-                    "guest",
-                    expires_at,
-                )?,
+                access_token: participant_token(&state, session_id, "guest", expires_at)?,
                 expires_at,
             }),
         ));
@@ -483,12 +478,7 @@ pub async fn create_guest_session(
                         display_name,
                         role: "guest".to_owned(),
                         status,
-                        access_token: participant_token(
-                            &state,
-                            session_id,
-                            "guest",
-                            expires_at,
-                        )?,
+                        access_token: participant_token(&state, session_id, "guest", expires_at)?,
                         expires_at,
                     }),
                 ));
@@ -905,10 +895,7 @@ fn authorize_participant(
     Ok(claims)
 }
 
-fn decode_participant_token(
-    token: &str,
-    state: &AppState,
-) -> Result<ParticipantClaims, ApiError> {
+fn decode_participant_token(token: &str, state: &AppState) -> Result<ParticipantClaims, ApiError> {
     let claims = decode::<ParticipantClaims>(
         token,
         &DecodingKey::from_secret(state.guest_jwt_secret.as_bytes()),

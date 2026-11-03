@@ -47,30 +47,20 @@ pub enum SourceType {
     Aux,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SrtMode {
     Caller,
+    #[default]
     Listener,
 }
 
-impl Default for SrtMode {
-    fn default() -> Self {
-        Self::Listener
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RtpEncoding {
     L16,
+    #[default]
     L24,
-}
-
-impl Default for RtpEncoding {
-    fn default() -> Self {
-        Self::L24
-    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
