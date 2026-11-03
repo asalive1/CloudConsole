@@ -111,11 +111,7 @@ async fn ensure_room_in_session(
     }
 }
 
-async fn plugin_request(
-    client: &reqwest::Client,
-    url: &str,
-    body: Value,
-) -> Result<Value, String> {
+async fn plugin_request(client: &reqwest::Client, url: &str, body: Value) -> Result<Value, String> {
     request(
         client,
         url,
@@ -128,11 +124,7 @@ async fn plugin_request(
     .await
 }
 
-async fn request(
-    client: &reqwest::Client,
-    url: &str,
-    body: Value,
-) -> Result<Value, String> {
+async fn request(client: &reqwest::Client, url: &str, body: Value) -> Result<Value, String> {
     let response = client
         .post(url)
         .json(&body)
