@@ -1,6 +1,7 @@
 use axum::{
-    extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    body::{to_bytes, Body},
+    extract::{OriginalUri, Path, State},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -30,6 +31,10 @@ pub enum ApiError {
     Database(#[from] sqlx::Error),
     #[error("token operation failed")]
     Token(#[from] jsonwebtoken::errors::Error),
+    #[error("audio engine is unavailable")]
+    AudioEngine(#[from] reqwest::Error),
+    #[error("Janus Gateway is unavailable: {0}")]
+    Janus(String),
 }
 
 impl IntoResponse for ApiError {
@@ -53,9 +58,66 @@ impl IntoResponse for ApiError {
                     "guest token operation failed".to_owned(),
                 )
             }
+            ApiError::AudioEngine(error) => {
+                tracing::error!(error = %error, "audio engine request failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "audio engine is unavailable".to_owned(),
+                )
+            }
+            ApiError::Janus(error) => {
+                tracing::error!(error = %error, "Janus Gateway request failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "live audio service is unavailable".to_owned(),
+                )
+            }
         };
         (status, Json(json!({ "error": message }))).into_response()
     }
+}
+
+pub async fn proxy_audio(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    request: axum::http::Request<Body>,
+) -> Result<Response, ApiError> {
+    authorize_station(&headers, &state)?;
+    let path = uri
+        .path()
+        .strip_prefix("/api/audio/")
+        .ok_or_else(|| ApiError::InvalidRequest("invalid audio engine path".to_owned()))?;
+    let mut upstream_url = format!("{}/{}", state.audio_engine_url.trim_end_matches('/'), path);
+    if let Some(query) = uri.query() {
+        upstream_url.push('?');
+        upstream_url.push_str(query);
+    }
+
+    let (parts, body) = request.into_parts();
+    let body = to_bytes(body, 1_048_576)
+        .await
+        .map_err(|error| ApiError::InvalidRequest(error.to_string()))?;
+    let mut upstream_request = state.http_client.request(
+        Method::from_bytes(parts.method.as_str().as_bytes())
+            .map_err(|_| ApiError::InvalidRequest("invalid HTTP method".to_owned()))?,
+        upstream_url,
+    );
+    if let Some(content_type) = parts.headers.get(header::CONTENT_TYPE) {
+        upstream_request = upstream_request.header(header::CONTENT_TYPE, content_type);
+    }
+    let upstream = upstream_request.body(body).send().await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())
+        .map_err(|_| ApiError::InvalidRequest("invalid upstream status".to_owned()))?;
+    let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+    let response_body = upstream.bytes().await?;
+    let mut response = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        response = response.header(header::CONTENT_TYPE, content_type);
+    }
+    response
+        .body(Body::from(response_body))
+        .map_err(|error| ApiError::InvalidRequest(error.to_string()))
 }
 
 #[derive(Serialize)]
@@ -123,16 +185,19 @@ pub async fn auth_validate(
         }));
     }
 
-    let claims = authorize_guest(&headers, &state)?;
+    let claims = authorize_participant(&headers, &state)?;
     let session_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
-    let status: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM sessions WHERE id = $1 AND station_id = $2 AND expires_at > NOW()",
+    let session: Option<(String, String)> = sqlx::query_as(
+        "SELECT role, status FROM sessions WHERE id = $1 AND station_id = $2 AND expires_at > NOW()",
     )
     .bind(session_id)
     .bind(state.station_id)
     .fetch_optional(&state.pool)
     .await?;
-    let status = status.ok_or(ApiError::Unauthorized)?;
+    let (role, status) = session.ok_or(ApiError::Unauthorized)?;
+    if role != claims.role {
+        return Err(ApiError::Unauthorized);
+    }
     Ok(Json(AuthResponse {
         authenticated: true,
         station_id: state.station_id,
@@ -316,13 +381,15 @@ pub struct GuestSessionRequest {
 #[derive(Serialize)]
 pub struct GuestSessionResponse {
     session_id: Uuid,
-    status: &'static str,
+    display_name: String,
+    role: String,
+    status: String,
     access_token: String,
     expires_at: DateTime<Utc>,
 }
 
 #[derive(Deserialize, Serialize)]
-struct GuestClaims {
+struct ParticipantClaims {
     sub: String,
     station_id: String,
     role: String,
@@ -340,6 +407,7 @@ pub async fn create_guest_session(
             "name must contain between 1 and 100 characters".to_owned(),
         ));
     }
+    expire_stale_sessions(&state).await?;
     let link = sqlx::query(
         "SELECT id, expires_at FROM guest_links WHERE station_id = $1 AND token_hash = $2 AND invalidated_at IS NULL AND expires_at > NOW()",
     )
@@ -350,9 +418,43 @@ pub async fn create_guest_session(
     .ok_or(ApiError::Unauthorized)?;
     let guest_link_id: Uuid = link.try_get("id")?;
     let expires_at: DateTime<Utc> = link.try_get("expires_at")?;
+    let active = sqlx::query(
+        "SELECT id, display_name, status FROM sessions WHERE station_id = $1 AND guest_link_id = $2 AND status IN ('pending', 'approved', 'connected', 'disconnected') AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(state.station_id)
+    .bind(guest_link_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if let Some(active) = active {
+        let display_name: String = active.try_get("display_name")?;
+        if display_name != name {
+            return Err(ApiError::Conflict(
+                "this invitation already has an active session".to_owned(),
+            ));
+        }
+        let session_id: Uuid = active.try_get("id")?;
+        let status: String = active.try_get("status")?;
+        return Ok((
+            StatusCode::OK,
+            Json(GuestSessionResponse {
+                session_id,
+                display_name,
+                role: "guest".to_owned(),
+                status,
+                access_token: participant_token(
+                    &state,
+                    session_id,
+                    "guest",
+                    expires_at,
+                )?,
+                expires_at,
+            }),
+        ));
+    }
+
     let session_id = Uuid::new_v4();
     let inserted = sqlx::query(
-        "INSERT INTO sessions (id, station_id, guest_link_id, role, display_name, status, expires_at) VALUES ($1, $2, $3, 'guest', $4, 'pending', $5) ON CONFLICT DO NOTHING",
+        "INSERT INTO sessions (id, station_id, guest_link_id, role, display_name, status, expires_at, approval_expires_at) VALUES ($1, $2, $3, 'guest', $4, 'pending', $5, LEAST($5, NOW() + INTERVAL '20 minutes')) ON CONFLICT DO NOTHING",
     )
     .bind(session_id)
     .bind(state.station_id)
@@ -362,30 +464,385 @@ pub async fn create_guest_session(
     .execute(&state.pool)
     .await?;
     if inserted.rows_affected() == 0 {
+        let active = sqlx::query(
+            "SELECT id, display_name, status FROM sessions WHERE station_id = $1 AND guest_link_id = $2 AND status IN ('pending', 'approved', 'connected', 'disconnected') AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(state.station_id)
+        .bind(guest_link_id)
+        .fetch_optional(&state.pool)
+        .await?;
+        if let Some(active) = active {
+            let display_name: String = active.try_get("display_name")?;
+            if display_name == name {
+                let session_id: Uuid = active.try_get("id")?;
+                let status: String = active.try_get("status")?;
+                return Ok((
+                    StatusCode::OK,
+                    Json(GuestSessionResponse {
+                        session_id,
+                        display_name,
+                        role: "guest".to_owned(),
+                        status,
+                        access_token: participant_token(
+                            &state,
+                            session_id,
+                            "guest",
+                            expires_at,
+                        )?,
+                        expires_at,
+                    }),
+                ));
+            }
+        }
         return Err(ApiError::Conflict(
             "this guest link already has an active session".to_owned(),
         ));
     }
-    let claims = GuestClaims {
-        sub: session_id.to_string(),
-        station_id: state.station_id.to_string(),
-        role: "guest".to_owned(),
-        exp: expires_at.timestamp() as usize,
-    };
-    let access_token = encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(state.guest_jwt_secret.as_bytes()),
-    )?;
     Ok((
         StatusCode::CREATED,
         Json(GuestSessionResponse {
             session_id,
-            status: "pending",
-            access_token,
+            display_name: name.to_owned(),
+            role: "guest".to_owned(),
+            status: "pending".to_owned(),
+            access_token: participant_token(&state, session_id, "guest", expires_at)?,
             expires_at,
         }),
     ))
+}
+
+#[derive(Deserialize)]
+pub struct CreateLiveSession {
+    display_name: String,
+    role: String,
+}
+
+#[derive(Serialize)]
+pub struct LiveSessionResponse {
+    id: Uuid,
+    display_name: String,
+    role: String,
+    status: String,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+pub struct LiveSessionTokenResponse {
+    session_id: Uuid,
+    display_name: String,
+    role: String,
+    status: String,
+    access_token: String,
+    expires_at: DateTime<Utc>,
+}
+
+pub async fn create_live_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateLiveSession>,
+) -> Result<(StatusCode, Json<LiveSessionTokenResponse>), ApiError> {
+    authorize_station(&headers, &state)?;
+    let display_name = request.display_name.trim();
+    if display_name.is_empty() || display_name.len() > 100 {
+        return Err(ApiError::InvalidRequest(
+            "display_name must contain between 1 and 100 characters".to_owned(),
+        ));
+    }
+    if !matches!(request.role.as_str(), "host" | "co_host") {
+        return Err(ApiError::InvalidRequest(
+            "role must be host or co_host".to_owned(),
+        ));
+    }
+
+    let expires_at = Utc::now() + chrono::Duration::hours(8);
+    let mut transaction = state.pool.begin().await?;
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (station_id, name, role) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(state.station_id)
+    .bind(display_name)
+    .bind(&request.role)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let session_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO sessions (id, station_id, user_id, role, display_name, status, expires_at) VALUES ($1, $2, $3, $4, $5, 'approved', $6)",
+    )
+    .bind(session_id)
+    .bind(state.station_id)
+    .bind(user_id)
+    .bind(&request.role)
+    .bind(display_name)
+    .bind(expires_at)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(LiveSessionTokenResponse {
+            session_id,
+            display_name: display_name.to_owned(),
+            role: request.role.clone(),
+            status: "approved".to_owned(),
+            access_token: participant_token(&state, session_id, &request.role, expires_at)?,
+            expires_at,
+        }),
+    ))
+}
+
+pub async fn list_live_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<LiveSessionResponse>>, ApiError> {
+    authorize_station(&headers, &state)?;
+    expire_stale_sessions(&state).await?;
+    let rows = sqlx::query(
+        "SELECT id, display_name, role, status, expires_at FROM sessions WHERE station_id = $1 AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 100",
+    )
+    .bind(state.station_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| LiveSessionResponse {
+                id: row.get("id"),
+                display_name: row.get("display_name"),
+                role: row.get("role"),
+                status: row.get("status"),
+                expires_at: row.get("expires_at"),
+            })
+            .collect(),
+    ))
+}
+
+pub async fn approve_guest_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<LiveSessionResponse>, ApiError> {
+    authorize_station(&headers, &state)?;
+    expire_stale_sessions(&state).await?;
+    let row = sqlx::query(
+        "UPDATE sessions s SET status = 'approved', expires_at = gl.expires_at, approval_expires_at = NULL, updated_at = NOW() FROM guest_links gl WHERE s.id = $1 AND s.station_id = $2 AND s.guest_link_id = gl.id AND s.status = 'pending' AND s.approval_expires_at > NOW() AND gl.invalidated_at IS NULL AND gl.expires_at > NOW() RETURNING s.id, s.display_name, s.role, s.status, s.expires_at",
+    )
+    .bind(id)
+    .bind(state.station_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(Json(LiveSessionResponse {
+        id: row.get("id"),
+        display_name: row.get("display_name"),
+        role: row.get("role"),
+        status: row.get("status"),
+        expires_at: row.get("expires_at"),
+    }))
+}
+
+pub async fn reject_guest_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<LiveSessionResponse>, ApiError> {
+    authorize_station(&headers, &state)?;
+    expire_stale_sessions(&state).await?;
+    let row = sqlx::query(
+        "UPDATE sessions SET status = 'rejected', approval_expires_at = NULL, updated_at = NOW() WHERE id = $1 AND station_id = $2 AND role = 'guest' AND status = 'pending' RETURNING id, display_name, role, status, expires_at",
+    )
+    .bind(id)
+    .bind(state.station_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(Json(LiveSessionResponse {
+        id: row.get("id"),
+        display_name: row.get("display_name"),
+        role: row.get("role"),
+        status: row.get("status"),
+        expires_at: row.get("expires_at"),
+    }))
+}
+
+pub async fn get_guest_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_participant(&headers, &state)?;
+    if claims.role != "guest" || Uuid::parse_str(&claims.sub).ok() != Some(id) {
+        return Err(ApiError::Unauthorized);
+    }
+    expire_stale_sessions(&state).await?;
+    let row = sqlx::query(
+        "SELECT s.id, s.display_name, s.role, s.status, s.expires_at FROM sessions s JOIN guest_links gl ON gl.id = s.guest_link_id AND gl.station_id = s.station_id WHERE s.id = $1 AND s.station_id = $2 AND gl.invalidated_at IS NULL AND gl.expires_at > NOW()",
+    )
+    .bind(id)
+    .bind(state.station_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::Unauthorized)?;
+    Ok(Json(json!({
+        "session_id": row.get::<Uuid, _>("id"),
+        "display_name": row.get::<String, _>("display_name"),
+        "role": row.get::<String, _>("role"),
+        "status": row.get::<String, _>("status"),
+        "expires_at": row.get::<DateTime<Utc>, _>("expires_at")
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct ConnectionStateRequest {
+    state: String,
+}
+
+pub async fn get_live_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_participant(&headers, &state)?;
+    let claim_session_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    if claim_session_id != id {
+        return Err(ApiError::Unauthorized);
+    }
+    expire_stale_sessions(&state).await?;
+    let row = sqlx::query(
+        "SELECT s.display_name, s.role, s.status FROM sessions s LEFT JOIN guest_links gl ON gl.id = s.guest_link_id AND gl.station_id = s.station_id WHERE s.id = $1 AND s.station_id = $2 AND s.role = $3 AND s.expires_at > NOW() AND (s.guest_link_id IS NULL OR (gl.invalidated_at IS NULL AND gl.expires_at > NOW()))",
+    )
+    .bind(id)
+    .bind(state.station_id)
+    .bind(&claims.role)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::Unauthorized)?;
+    let status: String = row.try_get("status")?;
+    if !matches!(status.as_str(), "approved" | "connected" | "disconnected") {
+        return Err(ApiError::Conflict(format!(
+            "session is not approved for live audio ({status})"
+        )));
+    }
+
+    let _room_guard = state.janus_room_lock.lock().await;
+    crate::janus::ensure_audio_room(
+        &state.http_client,
+        &state.janus_http_url,
+        state.janus_room_id,
+        &state.janus_room_pin,
+    )
+    .await
+    .map_err(ApiError::Janus)?;
+
+    Ok(Json(json!({
+        "session_id": id,
+        "display_name": row.try_get::<String, _>("display_name")?,
+        "role": claims.role,
+        "websocket_url": "",
+        "room_id": state.janus_room_id,
+        "room_pin": state.janus_room_pin,
+        "ice_servers": state.janus_ice_servers
+    })))
+}
+
+pub async fn janus_websocket_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let original_uri = headers
+        .get("x-original-uri")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(ApiError::Unauthorized)?;
+    let token = original_uri
+        .split_once('?')
+        .map(|(_, query)| query)
+        .and_then(|query| {
+            query
+                .split('&')
+                .find_map(|parameter| parameter.strip_prefix("token="))
+        })
+        .filter(|token| !token.is_empty())
+        .ok_or(ApiError::Unauthorized)?;
+    let claims = decode_participant_token(token, &state)?;
+    let session_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sessions s LEFT JOIN guest_links gl ON gl.id = s.guest_link_id AND gl.station_id = s.station_id WHERE s.id = $1 AND s.station_id = $2 AND s.role = $3 AND s.status IN ('approved', 'connected', 'disconnected') AND s.expires_at > NOW() AND (s.guest_link_id IS NULL OR (gl.invalidated_at IS NULL AND gl.expires_at > NOW())))",
+    )
+    .bind(session_id)
+    .bind(state.station_id)
+    .bind(&claims.role)
+    .fetch_one(&state.pool)
+    .await?;
+    if !active {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn update_live_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(request): Json<ConnectionStateRequest>,
+) -> Result<Json<LiveSessionResponse>, ApiError> {
+    let claims = authorize_participant(&headers, &state)?;
+    if Uuid::parse_str(&claims.sub).ok() != Some(id) {
+        return Err(ApiError::Unauthorized);
+    }
+    let status = match request.state.as_str() {
+        "connected" => "connected",
+        "disconnected" => "disconnected",
+        _ => {
+            return Err(ApiError::InvalidRequest(
+                "state must be connected or disconnected".to_owned(),
+            ));
+        }
+    };
+    let row = sqlx::query(
+        "UPDATE sessions s SET status = $1, updated_at = NOW() WHERE s.id = $2 AND s.station_id = $3 AND s.role = $4 AND s.status IN ('approved', 'connected', 'disconnected') AND s.expires_at > NOW() AND (s.guest_link_id IS NULL OR EXISTS (SELECT 1 FROM guest_links gl WHERE gl.id = s.guest_link_id AND gl.station_id = s.station_id AND gl.invalidated_at IS NULL AND gl.expires_at > NOW())) RETURNING s.id, s.display_name, s.role, s.status, s.expires_at",
+    )
+    .bind(status)
+    .bind(id)
+    .bind(state.station_id)
+    .bind(&claims.role)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(ApiError::Unauthorized)?;
+    Ok(Json(LiveSessionResponse {
+        id: row.get("id"),
+        display_name: row.get("display_name"),
+        role: row.get("role"),
+        status: row.get("status"),
+        expires_at: row.get("expires_at"),
+    }))
+}
+
+async fn expire_stale_sessions(state: &AppState) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE sessions SET status = 'expired', approval_expires_at = NULL, updated_at = NOW() WHERE station_id = $1 AND status IN ('pending', 'approved', 'connected', 'disconnected') AND ((status = 'pending' AND approval_expires_at <= NOW()) OR expires_at <= NOW())",
+    )
+    .bind(state.station_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
+fn participant_token(
+    state: &AppState,
+    session_id: Uuid,
+    role: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<String, ApiError> {
+    let claims = ParticipantClaims {
+        sub: session_id.to_string(),
+        station_id: state.station_id.to_string(),
+        role: role.to_owned(),
+        exp: expires_at.timestamp() as usize,
+    };
+    Ok(encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(state.guest_jwt_secret.as_bytes()),
+    )?)
 }
 
 #[derive(Serialize)]
@@ -435,20 +892,33 @@ fn api_key_matches(supplied: &str, expected: &str) -> bool {
     supplied.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 1
 }
 
-fn authorize_guest(headers: &HeaderMap, state: &AppState) -> Result<GuestClaims, ApiError> {
+fn authorize_participant(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<ParticipantClaims, ApiError> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .ok_or(ApiError::Unauthorized)?;
-    let claims = decode::<GuestClaims>(
+    let claims = decode_participant_token(token, state)?;
+    Ok(claims)
+}
+
+fn decode_participant_token(
+    token: &str,
+    state: &AppState,
+) -> Result<ParticipantClaims, ApiError> {
+    let claims = decode::<ParticipantClaims>(
         token,
         &DecodingKey::from_secret(state.guest_jwt_secret.as_bytes()),
         &Validation::new(Algorithm::HS256),
     )
     .map_err(|_| ApiError::Unauthorized)?
     .claims;
-    if claims.role != "guest" || claims.station_id != state.station_id.to_string() {
+    if !matches!(claims.role.as_str(), "guest" | "host" | "co_host")
+        || claims.station_id != state.station_id.to_string()
+    {
         return Err(ApiError::Unauthorized);
     }
     Ok(claims)

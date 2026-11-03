@@ -1,10 +1,13 @@
-use std::{env, net::SocketAddr, str::FromStr};
+use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
 
 use axum::{routing::get, Router};
+use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
+use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod janus;
 mod routes;
 
 #[derive(Clone)]
@@ -13,6 +16,13 @@ pub struct AppState {
     pub station_id: Uuid,
     pub station_api_key: String,
     pub guest_jwt_secret: String,
+    pub audio_engine_url: String,
+    pub http_client: reqwest::Client,
+    pub janus_http_url: String,
+    pub janus_room_id: u64,
+    pub janus_room_pin: String,
+    pub janus_ice_servers: Vec<Value>,
+    pub janus_room_lock: Arc<Mutex<()>>,
 }
 
 #[tokio::main]
@@ -31,6 +41,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let station_id = Uuid::from_str(&required_env("STATION_ID")?)?;
+    let janus_room_id = env::var("JANUS_ROOM_ID")
+        .unwrap_or_else(|_| "4815162342".to_owned())
+        .parse::<u64>()?;
+    let janus_room_pin = env::var("JANUS_ROOM_PIN")
+        .unwrap_or_else(|_| "local-development-room-pin-change-me".to_owned());
+    if janus_room_pin.len() < 12 {
+        return Err("JANUS_ROOM_PIN must contain at least 12 characters".into());
+    }
+
+    let mut janus_ice_servers = Vec::new();
+    if let Ok(stun_server) = env::var("STUN_SERVER") {
+        if !stun_server.trim().is_empty() {
+            janus_ice_servers.push(json!({ "urls": stun_server }));
+        }
+    }
+    if let Ok(turn_server) = env::var("TURN_SERVER_URL") {
+        if !turn_server.trim().is_empty() {
+            let username = required_env("TURN_SERVER_USERNAME")?;
+            let credential = required_env("TURN_SERVER_CREDENTIAL")?;
+            janus_ice_servers.push(json!({
+                "urls": turn_server,
+                "username": username,
+                "credential": credential
+            }));
+        }
+    }
+
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .connect(&database_url)
@@ -48,6 +85,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         station_id,
         station_api_key,
         guest_jwt_secret,
+        audio_engine_url: env::var("AUDIO_ENGINE_URL")
+            .unwrap_or_else(|_| "http://audio-engine:8001".to_owned()),
+        http_client: reqwest::Client::new(),
+        janus_http_url: env::var("JANUS_HTTP_URL")
+            .unwrap_or_else(|_| "http://janus:8088/janus".to_owned()),
+        janus_room_id,
+        janus_room_pin,
+        janus_ice_servers,
+        janus_room_lock: Arc::new(Mutex::new(())),
     };
     let app = Router::new()
         .route("/api/health", get(routes::health))
@@ -70,7 +116,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/guest-links/{token}/sessions",
             axum::routing::post(routes::create_guest_session),
         )
+        .route(
+            "/api/live-sessions",
+            get(routes::list_live_sessions).post(routes::create_live_session),
+        )
+        .route(
+            "/api/live-sessions/{id}/approve",
+            axum::routing::post(routes::approve_guest_session),
+        )
+        .route(
+            "/api/live-sessions/{id}/reject",
+            axum::routing::post(routes::reject_guest_session),
+        )
+        .route(
+            "/api/live-sessions/{id}/connection",
+            get(routes::get_live_connection).patch(routes::update_live_connection),
+        )
+        .route("/api/janus-auth", get(routes::janus_websocket_auth))
+        .route(
+            "/api/guest-session/{id}",
+            get(routes::get_guest_session),
+        )
         .route("/api/users", get(routes::list_users))
+        .route("/api/audio/{*path}", axum::routing::any(routes::proxy_audio))
         .with_state(state)
         .layer(
             tower_http::trace::TraceLayer::new_for_http().make_span_with(

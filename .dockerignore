@@ -4,3 +4,4 @@ BuildPrompts
 frontend/node_modules
 frontend/dist
 target
+audio-engine/target

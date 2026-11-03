@@ -1,8 +1,5 @@
 import { useEffect, useState } from "react";
-
-type Health = {
-  status: string;
-};
+import LiveAudioConnection from "./LiveAudioConnection";
 
 type AuthResponse = {
   authenticated: boolean;
@@ -10,12 +7,47 @@ type AuthResponse = {
   role: string;
 };
 
+type Participant = {
+  session_id: string;
+  display_name: string;
+  role: string;
+  status: string;
+  access_token: string;
+  expires_at: string;
+};
+
+type GuestLink = {
+  id: string;
+  name: string | null;
+  expires_at: string;
+  invalidated_at: string | null;
+  invitation_token: string | null;
+};
+
+type LiveSession = {
+  id: string;
+  display_name: string;
+  role: string;
+  status: string;
+  expires_at: string;
+};
+
+type Health = { status: string };
+
 const API_BASE = "/api";
+const PARTICIPANT_KEY = "cloud-console-live-session";
+const STATION_KEY = "cloud-console-station-key";
 
 export default function App() {
-  const [apiKey, setApiKey] = useState("");
+  const invite = new URLSearchParams(window.location.search).get("invite");
+  return invite ? <GuestApp invitationToken={invite} /> : <StationApp />;
+}
+
+function StationApp() {
+  const [apiKey, setApiKey] = useState(() => sessionStorage.getItem(STATION_KEY) ?? "");
   const [health, setHealth] = useState<Health | null>(null);
   const [auth, setAuth] = useState<AuthResponse | null>(null);
+  const [participant, setParticipant] = useState<Participant | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -26,11 +58,8 @@ export default function App() {
       url.searchParams.delete("api_key");
       window.history.replaceState({}, "", url);
     }
-    void fetch(`${API_BASE}/health`)
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`Health check failed (${response.status})`);
-        setHealth((await response.json()) as Health);
-      })
+    void apiRequest<Health>("/health")
+      .then(setHealth)
       .catch((cause: unknown) => setError(errorMessage(cause)));
   }, []);
 
@@ -38,16 +67,40 @@ export default function App() {
     event.preventDefault();
     setError("");
     try {
-      const response = await fetch(`${API_BASE}/auth/login`, {
+      const response = await apiRequest<AuthResponse>("/auth/login", {
         method: "POST",
         headers: { "X-API-Key": apiKey },
       });
-      if (!response.ok) throw new Error(`Authentication failed (${response.status})`);
-      setAuth((await response.json()) as AuthResponse);
+      setAuth(response);
+      sessionStorage.setItem(STATION_KEY, apiKey);
+      const saved = readParticipant();
+      if (saved) {
+        try {
+          await apiRequest("/auth/validate", {
+            headers: { Authorization: `Bearer ${saved.access_token}` },
+          });
+          setParticipant(saved);
+        } catch {
+          sessionStorage.removeItem(PARTICIPANT_KEY);
+        }
+      }
     } catch (cause) {
       setError(errorMessage(cause));
       setAuth(null);
     }
+  }
+
+  function signOut() {
+    setAuth(null);
+    setParticipant(null);
+    setApiKey("");
+    sessionStorage.removeItem(STATION_KEY);
+    sessionStorage.removeItem(PARTICIPANT_KEY);
+  }
+
+  function saveParticipant(next: Participant) {
+    setParticipant(next);
+    sessionStorage.setItem(PARTICIPANT_KEY, JSON.stringify(next));
   }
 
   return (
@@ -67,26 +120,19 @@ export default function App() {
         <p className="eyebrow">STATION CONTROL</p>
         <h2>Your studio, wherever you are.</h2>
         <p className="intro">
-          The platform foundation is ready. Sign in with the station API key to
-          verify this station&apos;s connection.
+          Connect a host or co-host microphone, manage guest invitations, and approve callers.
         </p>
       </section>
 
-      <section className="panel" aria-labelledby="connection-title">
-        <div className="panel-heading">
-          <div>
-            <p className="eyebrow">PHASE 1–2 FOUNDATION</p>
-            <h3 id="connection-title">Station connection</h3>
+      {!auth ? (
+        <section className="panel" aria-labelledby="connection-title">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">STATION ACCESS</p>
+              <h3 id="connection-title">Operator sign-in</h3>
+            </div>
+            <span className="status-pill">Not connected</span>
           </div>
-          <span className="status-pill">{auth ? "Authenticated" : "Not connected"}</span>
-        </div>
-
-        {auth ? (
-          <div className="connection-details">
-            <p><span>Station</span><code>{auth.station_id}</code></p>
-            <p><span>Access</span><strong>{auth.role}</strong></p>
-          </div>
-        ) : (
           <form onSubmit={signIn}>
             <label htmlFor="api-key">Station API key</label>
             <input
@@ -100,9 +146,31 @@ export default function App() {
             />
             <button type="submit" disabled={!apiKey}>Connect to station</button>
           </form>
-        )}
-        {error && <p className="error" role="alert">{error}</p>}
-      </section>
+          {error && <p className="error" role="alert">{error}</p>}
+        </section>
+      ) : (
+        <>
+          <div className="operator-bar">
+            <p>Station <code>{auth.station_id}</code></p>
+            <button type="button" className="secondary" onClick={signOut}>Sign out</button>
+          </div>
+          {participant && (
+            <LiveAudioConnection
+              participant={participant}
+              onLeave={() => {
+                setParticipant(null);
+                sessionStorage.removeItem(PARTICIPANT_KEY);
+              }}
+            />
+          )}
+          <StationWorkspace
+            apiKey={apiKey}
+            onParticipant={saveParticipant}
+            onError={(message) => setError(message)}
+          />
+          {error && <p className="error" role="alert">{error}</p>}
+        </>
+      )}
 
       <footer>
         <span>Cloud Console</span>
@@ -110,6 +178,463 @@ export default function App() {
       </footer>
     </main>
   );
+}
+
+function StationWorkspace({
+  apiKey,
+  onParticipant,
+  onError,
+}: {
+  apiKey: string;
+  onParticipant: (participant: Participant) => void;
+  onError: (message: string) => void;
+}) {
+  const [displayName, setDisplayName] = useState("");
+  const [role, setRole] = useState("host");
+  const [guestName, setGuestName] = useState("");
+  const [expiresAt, setExpiresAt] = useState(defaultExpiry());
+  const [links, setLinks] = useState<GuestLink[]>([]);
+  const [newLink, setNewLink] = useState<GuestLink | null>(null);
+  const [sessions, setSessions] = useState<LiveSession[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const operatorHeaders: HeadersInit = { "X-API-Key": apiKey };
+
+  async function refresh() {
+    const [guestLinks, liveSessions] = await Promise.all([
+      apiRequest<GuestLink[]>("/guest-links", { headers: operatorHeaders }),
+      apiRequest<LiveSession[]>("/live-sessions", { headers: operatorHeaders }),
+    ]);
+    setLinks(guestLinks);
+    setSessions(liveSessions);
+  }
+
+  useEffect(() => {
+    let active = true;
+    const load = () => {
+      void Promise.all([
+        apiRequest<GuestLink[]>("/guest-links", { headers: operatorHeaders }),
+        apiRequest<LiveSession[]>("/live-sessions", { headers: operatorHeaders }),
+      ])
+        .then(([guestLinks, liveSessions]) => {
+          if (active) {
+            setLinks(guestLinks);
+            setSessions(liveSessions);
+          }
+        })
+        .catch((cause: unknown) => {
+          if (active) onError(errorMessage(cause));
+        });
+    };
+    load();
+    const timer = window.setInterval(load, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [apiKey]);
+
+  async function startLiveSession(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    onError("");
+    try {
+      const session = await apiRequest<Participant>("/live-sessions", {
+        method: "POST",
+        headers: { ...operatorHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: displayName, role }),
+      });
+      onParticipant(session);
+      setDisplayName("");
+      await refresh();
+    } catch (cause) {
+      onError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createGuestLink(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    onError("");
+    try {
+      const link = await apiRequest<GuestLink>("/guest-links", {
+        method: "POST",
+        headers: { ...operatorHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: guestName.trim() || null,
+          expires_at: new Date(expiresAt).toISOString(),
+        }),
+      });
+      setNewLink(link);
+      setGuestName("");
+      await refresh();
+    } catch (cause) {
+      onError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function decideGuest(id: string, decision: "approve" | "reject") {
+    setBusy(true);
+    onError("");
+    try {
+      await apiRequest(`/live-sessions/${id}/${decision}`, {
+        method: "POST",
+        headers: operatorHeaders,
+      });
+      await refresh();
+    } catch (cause) {
+      onError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function invalidateLink(id: string) {
+    setBusy(true);
+    onError("");
+    try {
+      await apiRequest(`/guest-links/${id}`, {
+        method: "DELETE",
+        headers: operatorHeaders,
+      });
+      if (newLink?.id === id) setNewLink(null);
+      await refresh();
+    } catch (cause) {
+      onError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyInvitation(link: GuestLink) {
+    if (!link.invitation_token) return;
+    const invitationUrl = `${window.location.origin}/?invite=${encodeURIComponent(link.invitation_token)}`;
+    try {
+      await navigator.clipboard.writeText(invitationUrl);
+    } catch (cause) {
+      onError(`Could not copy the invitation link: ${errorMessage(cause)}`);
+    }
+  }
+
+  const pendingGuests = sessions.filter((session) => session.role === "guest" && session.status === "pending");
+
+  return (
+    <div className="workspace-grid">
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">STUDIO</p>
+            <h3>Connect a microphone</h3>
+          </div>
+        </div>
+        <form onSubmit={startLiveSession}>
+          <label htmlFor="display-name">Display name</label>
+          <input
+            id="display-name"
+            value={displayName}
+            onChange={(event) => setDisplayName(event.target.value)}
+            maxLength={100}
+            required
+          />
+          <label htmlFor="participant-role">Studio role</label>
+          <select id="participant-role" value={role} onChange={(event) => setRole(event.target.value)}>
+            <option value="host">Host</option>
+            <option value="co_host">Co-Host</option>
+          </select>
+          <button type="submit" disabled={busy}>Start live session</button>
+        </form>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">INVITATIONS</p>
+            <h3>Create a guest link</h3>
+          </div>
+        </div>
+        <form onSubmit={createGuestLink}>
+          <label htmlFor="guest-link-name">Invitation name</label>
+          <input
+            id="guest-link-name"
+            value={guestName}
+            onChange={(event) => setGuestName(event.target.value)}
+            placeholder="Optional guest or segment name"
+            maxLength={100}
+          />
+          <label htmlFor="guest-link-expiry">Link expires</label>
+          <input
+            id="guest-link-expiry"
+            type="datetime-local"
+            value={expiresAt}
+            onChange={(event) => setExpiresAt(event.target.value)}
+            required
+          />
+          <button type="submit" disabled={busy}>Create invitation</button>
+        </form>
+        {newLink?.invitation_token && (
+          <div className="invitation-created">
+            <p>New invitation ready. Copy it now; the token is only shown once.</p>
+            <code>{`${window.location.origin}/?invite=${newLink.invitation_token}`}</code>
+            <button type="button" className="secondary" onClick={() => void copyInvitation(newLink)}>
+              Copy invitation link
+            </button>
+          </div>
+        )}
+        <ul className="item-list">
+          {links.map((link) => (
+            <li key={link.id}>
+              <div>
+                <strong>{link.name || "Guest invitation"}</strong>
+                <span>{link.invalidated_at ? "Invalidated" : `Expires ${formatDate(link.expires_at)}`}</span>
+              </div>
+              {link.invitation_token ? (
+                <button type="button" className="secondary" onClick={() => void copyInvitation(link)}>
+                  Copy link
+                </button>
+              ) : (
+                !link.invalidated_at && (
+                  <button type="button" className="secondary" disabled={busy} onClick={() => void invalidateLink(link.id)}>
+                    Revoke
+                  </button>
+                )
+              )}
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section className="panel session-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">LIVE SESSIONS</p>
+            <h3>Guest approval and studio status</h3>
+          </div>
+          <span className="status-pill">{pendingGuests.length} awaiting approval</span>
+        </div>
+        {sessions.length === 0 ? (
+          <p className="muted">No recent live sessions.</p>
+        ) : (
+          <ul className="item-list">
+            {sessions.map((session) => (
+              <li key={session.id}>
+                <div>
+                  <strong>{session.display_name}</strong>
+                  <span>{roleLabel(session.role)} · {session.status}</span>
+                </div>
+                {session.role === "guest" && session.status === "pending" && (
+                  <div className="inline-actions">
+                    <button type="button" disabled={busy} onClick={() => void decideGuest(session.id, "approve")}>
+                      Approve
+                    </button>
+                    <button type="button" className="secondary" disabled={busy} onClick={() => void decideGuest(session.id, "reject")}>
+                      Reject
+                    </button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function GuestApp({ invitationToken }: { invitationToken: string }) {
+  const [name, setName] = useState("");
+  const [participant, setParticipant] = useState<Participant | null>(() =>
+    readParticipant(`cloud-console-guest-${invitationToken}`),
+  );
+  const [status, setStatus] = useState(participant?.status ?? "");
+  const [inStudio, setInStudio] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const storageKey = `cloud-console-guest-${invitationToken}`;
+
+  useEffect(() => {
+    if (!participant) return;
+    let active = true;
+    let timer: number | null = null;
+    const check = () => {
+      void apiRequest<{ status: string }>(`/guest-session/${participant.session_id}`, {
+        headers: { Authorization: `Bearer ${participant.access_token}` },
+      })
+        .then((response) => {
+          if (active) {
+            setStatus(response.status);
+            if (response.status !== "pending" && timer !== null) {
+              window.clearInterval(timer);
+              timer = null;
+            }
+          }
+        })
+        .catch((cause: unknown) => {
+          if (active) setError(errorMessage(cause));
+        });
+    };
+    check();
+    timer = window.setInterval(check, 2500);
+    return () => {
+      active = false;
+      if (timer !== null) window.clearInterval(timer);
+    };
+  }, [participant]);
+
+  async function requestToJoin(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const response = await apiRequest<Participant>(
+        `/guest-links/${encodeURIComponent(invitationToken)}/sessions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        },
+      );
+      setParticipant(response);
+      setStatus(response.status);
+      sessionStorage.setItem(storageKey, JSON.stringify(response));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function reconnectWithSameLink() {
+    setParticipant(null);
+    setStatus("");
+    setInStudio(false);
+    sessionStorage.removeItem(storageKey);
+  }
+
+  return (
+    <main className="shell guest-shell">
+      <header className="topbar">
+        <div className="brand-mark" aria-hidden="true">CC</div>
+        <div>
+          <p className="eyebrow">GUEST CONNECTION</p>
+          <h1>Cloud Console</h1>
+        </div>
+        <span className="service-status online"><span /> Invitation link</span>
+      </header>
+      <section className="welcome">
+        <p className="eyebrow">YOU&apos;RE INVITED</p>
+        <h2>Join the live conversation.</h2>
+        <p className="intro">Enter your name and request to connect. Your microphone stays off until the host approves you.</p>
+      </section>
+
+      {inStudio && participant ? (
+        <LiveAudioConnection
+          participant={participant}
+          onLeave={() => {
+            setInStudio(false);
+            setStatus("disconnected");
+            const next = { ...participant, status: "disconnected" };
+            setParticipant(next);
+            sessionStorage.setItem(storageKey, JSON.stringify(next));
+          }}
+        />
+      ) : !participant ? (
+        <section className="panel" aria-labelledby="guest-connect-title">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">REGISTER YOUR NAME</p>
+              <h3 id="guest-connect-title">Request to join</h3>
+            </div>
+          </div>
+          <form onSubmit={requestToJoin}>
+            <label htmlFor="guest-display-name">Your name</label>
+            <input
+              id="guest-display-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              maxLength={100}
+              autoComplete="name"
+              required
+            />
+            <button type="submit" disabled={busy}>{busy ? "Sending request..." : "Connect"}</button>
+          </form>
+          {error && <p className="error" role="alert">{error}</p>}
+        </section>
+      ) : status === "pending" ? (
+        <section className="panel">
+          <p className="eyebrow">HOST APPROVAL</p>
+          <h3>Waiting for the host</h3>
+          <p className="muted">Your request is pending. You can connect your microphone after approval.</p>
+          {error && <p className="error" role="alert">{error}</p>}
+        </section>
+      ) : status === "rejected" ? (
+        <section className="panel">
+          <p className="eyebrow">HOST RESPONSE</p>
+          <h3>Connection Rejected</h3>
+          <p className="muted">You may request access again while this invitation link is valid.</p>
+          <button type="button" onClick={reconnectWithSameLink}>Request access again</button>
+        </section>
+      ) : status === "expired" ? (
+        <section className="panel">
+          <h3>Invitation expired</h3>
+          <p className="muted">Ask the host for a new invitation link.</p>
+        </section>
+      ) : (
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">HOST APPROVAL</p>
+              <h3>{status === "disconnected" ? "You may reconnect" : "You are approved"}</h3>
+            </div>
+            <span className="status-pill active">Approved</span>
+          </div>
+          <p className="muted">Connect your microphone when you are ready to join the conversation.</p>
+          <button type="button" onClick={() => setInStudio(true)}>Join the live audio</button>
+          {error && <p className="error" role="alert">{error}</p>}
+        </section>
+      )}
+      <footer><span>Cloud Console guest connection</span></footer>
+    </main>
+  );
+}
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, init);
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Request failed (${response.status})`);
+  }
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+function readParticipant(key = PARTICIPANT_KEY): Participant | null {
+  const saved = sessionStorage.getItem(key);
+  if (!saved) return null;
+  try {
+    return JSON.parse(saved) as Participant;
+  } catch {
+    sessionStorage.removeItem(key);
+    return null;
+  }
+}
+
+function roleLabel(role: string): string {
+  if (role === "co_host") return "Co-Host";
+  return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
+function defaultExpiry(): string {
+  const date = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+  return date.toISOString().slice(0, 16);
+}
+
+function formatDate(value: string): string {
+  return new Date(value).toLocaleString();
 }
 
 function errorMessage(error: unknown): string {

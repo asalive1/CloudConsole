@@ -1,0 +1,1291 @@
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, Mutex},
+};
+
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use serde::{Deserialize, Serialize};
+use url::Host;
+use uuid::Uuid;
+
+#[derive(Debug, thiserror::Error)]
+pub enum EngineError {
+    #[error("{0}")]
+    InvalidRequest(String),
+    #[error("resource not found")]
+    NotFound,
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Pipeline(String),
+}
+
+impl From<gst::glib::Error> for EngineError {
+    fn from(error: gst::glib::Error) -> Self {
+        Self::Pipeline(error.to_string())
+    }
+}
+
+impl From<gst::glib::BoolError> for EngineError {
+    fn from(error: gst::glib::BoolError) -> Self {
+        Self::Pipeline(error.to_string())
+    }
+}
+
+impl From<gst::StateChangeError> for EngineError {
+    fn from(error: gst::StateChangeError) -> Self {
+        Self::Pipeline(error.to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceType {
+    Automation,
+    Aux,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SrtMode {
+    Caller,
+    Listener,
+}
+
+impl Default for SrtMode {
+    fn default() -> Self {
+        Self::Listener
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RtpEncoding {
+    L16,
+    L24,
+}
+
+impl Default for RtpEncoding {
+    fn default() -> Self {
+        Self::L24
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputTransport {
+    Test {
+        #[serde(default = "default_test_frequency")]
+        frequency: u32,
+    },
+    Rtp {
+        #[serde(default = "default_rtp_address")]
+        address: String,
+        #[serde(default = "default_rtp_port")]
+        port: u16,
+        #[serde(default)]
+        encoding: RtpEncoding,
+        #[serde(default = "default_channels")]
+        channels: u8,
+        #[serde(default = "default_payload_type")]
+        payload_type: u8,
+        #[serde(default = "default_jitter_buffer_ms")]
+        jitter_buffer_ms: u32,
+        #[serde(default)]
+        multicast_interface: Option<String>,
+    },
+    Srt {
+        #[serde(default = "default_srt_host")]
+        host: String,
+        port: u16,
+        #[serde(default)]
+        mode: SrtMode,
+        #[serde(default = "default_srt_latency_ms")]
+        latency_ms: u32,
+        #[serde(default)]
+        stream_id: Option<String>,
+        #[serde(default)]
+        passphrase: Option<String>,
+    },
+    Alsa {
+        device: String,
+        #[serde(default = "default_sample_rate")]
+        sample_rate: u32,
+        #[serde(default = "default_channels")]
+        channels: u8,
+        #[serde(default = "default_bit_depth")]
+        bit_depth: u8,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutputTransport {
+    Alsa {
+        device: String,
+        #[serde(default = "default_sample_rate")]
+        sample_rate: u32,
+        #[serde(default = "default_channels")]
+        channels: u8,
+        #[serde(default = "default_bit_depth")]
+        bit_depth: u8,
+    },
+    Rtp {
+        host: String,
+        port: u16,
+        #[serde(default)]
+        encoding: RtpEncoding,
+        #[serde(default = "default_channels")]
+        channels: u8,
+        #[serde(default = "default_payload_type")]
+        payload_type: u8,
+    },
+    Srt {
+        host: String,
+        port: u16,
+        #[serde(default = "default_srt_output_mode")]
+        mode: SrtMode,
+        #[serde(default = "default_srt_latency_ms")]
+        latency_ms: u32,
+        #[serde(default)]
+        stream_id: Option<String>,
+        #[serde(default)]
+        passphrase: Option<String>,
+        #[serde(default)]
+        pbkeylen: Option<u8>,
+        #[serde(default = "default_aac_bitrate")]
+        bitrate: u32,
+    },
+}
+
+#[derive(Serialize)]
+pub struct SourceSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub source_type: SourceType,
+    pub transport: &'static str,
+    pub state: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct OutputSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub transport: &'static str,
+    pub state: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SourceMetrics {
+    pub id: Uuid,
+    pub state: &'static str,
+    pub peak_dbfs: Option<Vec<f64>>,
+    pub jitter_ms: Option<f64>,
+    pub packets_lost: Option<u64>,
+    pub configured_latency_ms: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct AudioMetrics {
+    pub pipeline_state: &'static str,
+    pub source_count: usize,
+    pub output_count: usize,
+    pub program_peak_dbfs: Option<Vec<f64>>,
+    pub pipeline_latency_ms: Option<f64>,
+    pub sources: Vec<SourceMetrics>,
+    pub last_pipeline_error: Option<String>,
+}
+
+#[derive(Default)]
+struct LiveMetrics {
+    source_peaks: HashMap<Uuid, Vec<f64>>,
+    program_peaks: Option<Vec<f64>>,
+    last_pipeline_error: Option<String>,
+}
+
+struct ActiveSource {
+    id: Uuid,
+    name: String,
+    source_type: SourceType,
+    transport: &'static str,
+    input: InputTransport,
+    bin: gst::Bin,
+    mixer_pad: gst::Pad,
+    jitter_buffer: Option<gst::Element>,
+}
+
+struct ActiveOutput {
+    id: Uuid,
+    name: String,
+    transport: &'static str,
+    bin: gst::Bin,
+    tee_pad: gst::Pad,
+}
+
+pub struct AudioEngine {
+    pipeline: gst::Pipeline,
+    mixer: gst::Element,
+    program_tee: gst::Element,
+    sources: HashMap<Uuid, ActiveSource>,
+    outputs: HashMap<Uuid, ActiveOutput>,
+    metrics: Arc<Mutex<LiveMetrics>>,
+}
+
+impl AudioEngine {
+    pub fn new() -> Result<Self, EngineError> {
+        let pipeline = gst::Pipeline::new();
+        let mixer = gst::ElementFactory::make("audiomixer")
+            .name("program_mixer")
+            .build()?;
+        let convert = gst::ElementFactory::make("audioconvert")
+            .name("program_convert")
+            .build()?;
+        let resample = gst::ElementFactory::make("audioresample")
+            .name("program_resample")
+            .build()?;
+        let level = gst::ElementFactory::make("level")
+            .name("level-program")
+            .property("message", true)
+            .build()?;
+        let program_tee = gst::ElementFactory::make("tee")
+            .name("program_tee")
+            .build()?;
+        let output_queue = gst::ElementFactory::make("queue")
+            .name("local_null_queue")
+            .build()?;
+        let null_sink = gst::ElementFactory::make("fakesink")
+            .name("local_null_sink")
+            .property("sync", false)
+            .property("async", false)
+            .build()?;
+
+        pipeline.add_many([
+            &mixer,
+            &convert,
+            &resample,
+            &level,
+            &program_tee,
+            &output_queue,
+            &null_sink,
+        ])?;
+        gst::Element::link_many([&mixer, &convert, &resample, &level, &program_tee])?;
+        output_queue.link(&null_sink)?;
+        link_request_pad(&program_tee, "src_%u", &output_queue, "sink")?;
+        pipeline.set_state(gst::State::Playing)?;
+
+        let metrics = Arc::new(Mutex::new(LiveMetrics::default()));
+        start_bus_monitor(&pipeline, Arc::clone(&metrics));
+
+        Ok(Self {
+            pipeline,
+            mixer,
+            program_tee,
+            sources: HashMap::new(),
+            outputs: HashMap::new(),
+            metrics,
+        })
+    }
+
+    pub fn add_source(
+        &mut self,
+        name: String,
+        source_type: SourceType,
+        input: InputTransport,
+    ) -> Result<SourceSummary, EngineError> {
+        self.add_source_with_id(Uuid::new_v4(), name, source_type, input)
+    }
+
+    fn add_source_with_id(
+        &mut self,
+        id: Uuid,
+        name: String,
+        source_type: SourceType,
+        input: InputTransport,
+    ) -> Result<SourceSummary, EngineError> {
+        let name = validate_name(name)?;
+        let count = self
+            .sources
+            .values()
+            .filter(|source| source.source_type == source_type)
+            .count();
+        match source_type {
+            SourceType::Automation if count >= 1 => {
+                return Err(EngineError::Conflict(
+                    "a station supports one Automation input".to_owned(),
+                ));
+            }
+            SourceType::Aux if count >= 5 => {
+                return Err(EngineError::Conflict(
+                    "a station supports up to five AUX inputs".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+
+        validate_input(&input)?;
+        let transport = input.transport_name();
+        let bin = match &input {
+            InputTransport::Srt {
+                host,
+                port,
+                mode,
+                latency_ms,
+                stream_id,
+                passphrase,
+            } => {
+                let uri = srt_uri(
+                    host,
+                    *port,
+                    *mode,
+                    *latency_ms,
+                    stream_id.as_deref(),
+                    passphrase.as_deref(),
+                    None,
+                )?;
+                build_srt_input_bin(id, &uri)?
+            }
+            _ => {
+                let description = input.gst_description(id)?;
+                gst::parse::bin_from_description(&description, true).map_err(|error| {
+                    EngineError::Pipeline(sanitize_pipeline_error(error.to_string()))
+                })?
+            }
+        };
+        if matches!(&input, InputTransport::Srt { .. }) {
+            bin.set_property("async-handling", true);
+        }
+        self.pipeline.add(&bin)?;
+        let source_pad = bin
+            .static_pad("src")
+            .ok_or_else(|| EngineError::Pipeline("input pipeline has no output pad".to_owned()))?;
+        let mixer_pad = self
+            .mixer
+            .request_pad_simple("sink_%u")
+            .ok_or_else(|| EngineError::Pipeline("mixer rejected an input pad".to_owned()))?;
+        if let Err(error) = source_pad.link(&mixer_pad) {
+            self.mixer.release_request_pad(&mixer_pad);
+            let _ = self.pipeline.remove(&bin);
+            return Err(EngineError::Pipeline(error.to_string()));
+        }
+        if let Err(error) = bin.sync_state_with_parent() {
+            let _ = source_pad.unlink(&mixer_pad);
+            self.mixer.release_request_pad(&mixer_pad);
+            let _ = self.pipeline.remove(&bin);
+            return Err(EngineError::Pipeline(error.to_string()));
+        }
+        let jitter_buffer = bin.by_name(&format!("jitter-{}", id.simple()));
+        self.sources.insert(
+            id,
+            ActiveSource {
+                id,
+                name,
+                source_type,
+                transport,
+                input,
+                bin,
+                mixer_pad,
+                jitter_buffer,
+            },
+        );
+        Ok(self.source_summary(id).expect("source was just inserted"))
+    }
+
+    pub fn remove_source(&mut self, id: Uuid) -> Result<(), EngineError> {
+        let source = self.sources.remove(&id).ok_or(EngineError::NotFound)?;
+        let source_pad = source.bin.static_pad("src");
+        source.bin.set_state(gst::State::Null)?;
+        if let Some(source_pad) = source_pad {
+            let _ = source_pad.unlink(&source.mixer_pad);
+        }
+        self.mixer.release_request_pad(&source.mixer_pad);
+        self.pipeline.remove(&source.bin)?;
+        if let Ok(mut metrics) = self.metrics.lock() {
+            metrics.source_peaks.remove(&id);
+        }
+        Ok(())
+    }
+
+    pub fn recover_source(&mut self, id: Uuid) -> Result<SourceSummary, EngineError> {
+        let source = self.sources.get(&id).ok_or(EngineError::NotFound)?;
+        let name = source.name.clone();
+        let source_type = source.source_type;
+        let input = source.input.clone();
+        self.remove_source(id)?;
+        self.add_source_with_id(id, name, source_type, input)?;
+        Ok(self
+            .source_summary(id)
+            .expect("recovered source was just inserted"))
+    }
+
+    pub fn add_output(
+        &mut self,
+        name: String,
+        transport: OutputTransport,
+    ) -> Result<OutputSummary, EngineError> {
+        let name = validate_name(name)?;
+        validate_output(&transport)?;
+        let id = Uuid::new_v4();
+        let transport_name = transport.transport_name();
+        let description = transport.gst_description()?;
+        let bin = gst::parse::bin_from_description(&description, true)
+            .map_err(|error| EngineError::Pipeline(sanitize_pipeline_error(error.to_string())))?;
+        self.pipeline.add(&bin)?;
+        let tee_pad = self
+            .program_tee
+            .request_pad_simple("src_%u")
+            .ok_or_else(|| {
+                EngineError::Pipeline("program router rejected an output pad".to_owned())
+            })?;
+        let sink_pad = bin
+            .static_pad("sink")
+            .ok_or_else(|| EngineError::Pipeline("output pipeline has no input pad".to_owned()))?;
+        if let Err(error) = tee_pad.link(&sink_pad) {
+            self.program_tee.release_request_pad(&tee_pad);
+            let _ = self.pipeline.remove(&bin);
+            return Err(EngineError::Pipeline(error.to_string()));
+        }
+        if let Err(error) = bin.sync_state_with_parent() {
+            let _ = tee_pad.unlink(&sink_pad);
+            self.program_tee.release_request_pad(&tee_pad);
+            let _ = self.pipeline.remove(&bin);
+            return Err(EngineError::Pipeline(error.to_string()));
+        }
+        self.outputs.insert(
+            id,
+            ActiveOutput {
+                id,
+                name,
+                transport: transport_name,
+                bin,
+                tee_pad,
+            },
+        );
+        Ok(self.output_summary(id).expect("output was just inserted"))
+    }
+
+    pub fn remove_output(&mut self, id: Uuid) -> Result<(), EngineError> {
+        let output = self.outputs.remove(&id).ok_or(EngineError::NotFound)?;
+        let sink_pad = output.bin.static_pad("sink");
+        output.bin.set_state(gst::State::Null)?;
+        if let Some(sink_pad) = sink_pad {
+            let _ = output.tee_pad.unlink(&sink_pad);
+        }
+        self.program_tee.release_request_pad(&output.tee_pad);
+        self.pipeline.remove(&output.bin)?;
+        Ok(())
+    }
+
+    pub fn sources(&self) -> Vec<SourceSummary> {
+        self.sources
+            .keys()
+            .filter_map(|id| self.source_summary(*id))
+            .collect()
+    }
+
+    pub fn outputs(&self) -> Vec<OutputSummary> {
+        self.outputs
+            .keys()
+            .filter_map(|id| self.output_summary(*id))
+            .collect()
+    }
+
+    pub fn metrics(&self) -> Result<AudioMetrics, EngineError> {
+        let live_metrics = self
+            .metrics
+            .lock()
+            .map_err(|_| EngineError::Pipeline("audio metrics lock is poisoned".to_owned()))?;
+        let sources = self
+            .sources
+            .values()
+            .map(|source| {
+                let (jitter_ms, packets_lost) = source
+                    .jitter_buffer
+                    .as_ref()
+                    .map(jitter_stats)
+                    .unwrap_or((None, None));
+                SourceMetrics {
+                    id: source.id,
+                    state: state_name(source.bin.current_state()),
+                    peak_dbfs: live_metrics.source_peaks.get(&source.id).cloned(),
+                    jitter_ms,
+                    packets_lost,
+                    configured_latency_ms: source.input.configured_latency_ms(),
+                }
+            })
+            .collect();
+        Ok(AudioMetrics {
+            pipeline_state: state_name(self.pipeline.current_state()),
+            source_count: self.sources.len(),
+            output_count: self.outputs.len(),
+            program_peak_dbfs: live_metrics.program_peaks.clone(),
+            pipeline_latency_ms: query_pipeline_latency(&self.pipeline),
+            sources,
+            last_pipeline_error: live_metrics.last_pipeline_error.clone(),
+        })
+    }
+
+    fn source_summary(&self, id: Uuid) -> Option<SourceSummary> {
+        self.sources.get(&id).map(|source| SourceSummary {
+            id: source.id,
+            name: source.name.clone(),
+            source_type: source.source_type,
+            transport: source.transport,
+            state: state_name(source.bin.current_state()),
+        })
+    }
+
+    fn output_summary(&self, id: Uuid) -> Option<OutputSummary> {
+        self.outputs.get(&id).map(|output| OutputSummary {
+            id: output.id,
+            name: output.name.clone(),
+            transport: output.transport,
+            state: state_name(output.bin.current_state()),
+        })
+    }
+}
+
+impl InputTransport {
+    fn transport_name(&self) -> &'static str {
+        match self {
+            Self::Test { .. } => "test",
+            Self::Rtp { .. } => "rtp",
+            Self::Srt { .. } => "srt",
+            Self::Alsa { .. } => "alsa",
+        }
+    }
+
+    fn configured_latency_ms(&self) -> Option<u32> {
+        match self {
+            Self::Rtp {
+                jitter_buffer_ms, ..
+            } => Some(*jitter_buffer_ms),
+            Self::Srt { latency_ms, .. } => Some(*latency_ms),
+            Self::Test { .. } | Self::Alsa { .. } => None,
+        }
+    }
+
+    fn gst_description(&self, id: Uuid) -> Result<String, EngineError> {
+        let standardize = format!(
+            "! audioconvert ! audioresample ! audio/x-raw,format=F32LE,layout=interleaved,rate=48000,channels=2 ! level name=level-{} message=true ! queue",
+            id.simple()
+        );
+        let description = match self {
+            Self::Test { frequency } => {
+                format!("audiotestsrc is-live=true wave=sine freq={frequency} {standardize}")
+            }
+            Self::Rtp {
+                address,
+                port,
+                encoding,
+                channels,
+                payload_type,
+                jitter_buffer_ms,
+                multicast_interface,
+            } => {
+                validate_host(address)?;
+                let encoding_name = match encoding {
+                    RtpEncoding::L16 => "L16",
+                    RtpEncoding::L24 => "L24",
+                };
+                let interface_property = multicast_interface
+                    .as_deref()
+                    .map(|value| format!(" multicast-iface={}", gst_quote(value)))
+                    .unwrap_or_default();
+                format!(
+                    "udpsrc address={} port={port}{interface_property} caps=\"application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string){encoding_name},channels=(int){channels},payload=(int){payload_type}\" ! rtpjitterbuffer name=jitter-{} latency={jitter_buffer_ms} do-lost=true ! rtp{encoding_name}depay {standardize}",
+                    gst_quote(address),
+                    id.simple()
+                )
+            }
+            Self::Srt {
+                host,
+                port,
+                mode,
+                latency_ms,
+                stream_id,
+                passphrase,
+            } => {
+                let uri = srt_uri(
+                    host,
+                    *port,
+                    *mode,
+                    *latency_ms,
+                    stream_id.as_deref(),
+                    passphrase.as_deref(),
+                    None,
+                )?;
+                format!(
+                    "srtsrc uri={} ! tsdemux ! decodebin {standardize}",
+                    gst_quote(&uri)
+                )
+            }
+            Self::Alsa {
+                device,
+                sample_rate,
+                channels,
+                bit_depth,
+            } => {
+                let format = pcm_format(*bit_depth, false)?;
+                format!(
+                    "alsasrc device={} ! audio/x-raw,rate={sample_rate},channels={channels},format={format} {standardize}",
+                    gst_quote(device)
+                )
+            }
+        };
+        Ok(description)
+    }
+}
+
+fn build_srt_input_bin(id: Uuid, uri: &str) -> Result<gst::Bin, EngineError> {
+    let bin = gst::Bin::new();
+    let source = gst::ElementFactory::make("srtsrc")
+        .name(format!("srt-source-{}", id.simple()))
+        .property("uri", uri)
+        .property("wait-for-connection", false)
+        .build()?;
+    let demux = gst::ElementFactory::make("tsdemux").build()?;
+    let decoder = gst::ElementFactory::make("decodebin").build()?;
+    let convert = gst::ElementFactory::make("audioconvert").build()?;
+    let resample = gst::ElementFactory::make("audioresample").build()?;
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "F32LE")
+        .field("layout", "interleaved")
+        .field("rate", 48_000i32)
+        .field("channels", 2i32)
+        .build();
+    let caps_filter = gst::ElementFactory::make("capsfilter")
+        .property("caps", caps)
+        .build()?;
+    let level = gst::ElementFactory::make("level")
+        .name(format!("level-{}", id.simple()))
+        .property("message", true)
+        .build()?;
+    let queue = gst::ElementFactory::make("queue").build()?;
+
+    bin.add_many([
+        &source,
+        &demux,
+        &decoder,
+        &convert,
+        &resample,
+        &caps_filter,
+        &level,
+        &queue,
+    ])?;
+    source.link(&demux)?;
+    gst::Element::link_many([&convert, &resample, &caps_filter, &level, &queue])?;
+
+    let decoder_sink = decoder
+        .static_pad("sink")
+        .ok_or_else(|| EngineError::Pipeline("decoder has no input pad".to_owned()))?;
+    demux.connect_pad_added(move |_demux, src_pad| {
+        if src_pad.name().starts_with("audio_") && !decoder_sink.is_linked() {
+            if let Err(error) = src_pad.link(&decoder_sink) {
+                tracing::error!(pad = %src_pad.name(), link_error = ?error, "Failed to link SRT audio stream to decoder");
+            }
+        }
+    });
+
+    let convert_sink = convert
+        .static_pad("sink")
+        .ok_or_else(|| EngineError::Pipeline("audio converter has no input pad".to_owned()))?;
+    decoder.connect_pad_added(move |_decoder, src_pad| {
+        let is_audio = src_pad
+            .current_caps()
+            .and_then(|caps| caps.structure(0).map(|structure| structure.name().starts_with("audio/")))
+            .unwrap_or(false);
+        if !is_audio {
+            return;
+        }
+        if !convert_sink.is_linked() {
+            if let Err(error) = src_pad.link(&convert_sink) {
+                tracing::error!(pad = %src_pad.name(), link_error = ?error, "Failed to link decoded SRT audio");
+            }
+        }
+    });
+
+    let queue_src = queue
+        .static_pad("src")
+        .ok_or_else(|| EngineError::Pipeline("SRT audio queue has no output pad".to_owned()))?;
+    bin.add_pad(&gst::GhostPad::with_target(&queue_src)?)?;
+    Ok(bin)
+}
+
+impl OutputTransport {
+    fn transport_name(&self) -> &'static str {
+        match self {
+            Self::Alsa { .. } => "alsa",
+            Self::Rtp { .. } => "rtp",
+            Self::Srt { .. } => "srt",
+        }
+    }
+
+    fn gst_description(&self) -> Result<String, EngineError> {
+        match self {
+            Self::Alsa {
+                device,
+                sample_rate,
+                channels,
+                bit_depth,
+            } => {
+                let format = pcm_format(*bit_depth, false)?;
+                Ok(format!(
+                    "queue ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate},channels={channels},format={format} ! alsasink device={} sync=false",
+                    gst_quote(device)
+                ))
+            }
+            Self::Rtp {
+                host,
+                port,
+                encoding,
+                channels,
+                payload_type,
+            } => {
+                validate_host(host)?;
+                let (encoding_name, format) = match encoding {
+                    RtpEncoding::L16 => ("L16", "S16BE"),
+                    RtpEncoding::L24 => ("L24", "S24BE"),
+                };
+                Ok(format!(
+                    "queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port} sync=false",
+                    gst_quote(host)
+                ))
+            }
+            Self::Srt {
+                host,
+                port,
+                mode,
+                latency_ms,
+                stream_id,
+                passphrase,
+                pbkeylen,
+                bitrate,
+            } => {
+                let uri = srt_uri(
+                    host,
+                    *port,
+                    *mode,
+                    *latency_ms,
+                    stream_id.as_deref(),
+                    passphrase.as_deref(),
+                    *pbkeylen,
+                )?;
+                Ok(format!(
+                    "queue ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! voaacenc bitrate={bitrate} ! aacparse ! mpegtsmux ! srtsink uri={} sync=false",
+                    gst_quote(&uri)
+                ))
+            }
+        }
+    }
+}
+
+fn validate_input(input: &InputTransport) -> Result<(), EngineError> {
+    match input {
+        InputTransport::Test { frequency } if *frequency == 0 || *frequency > 20_000 => {
+            Err(EngineError::InvalidRequest(
+                "test tone frequency must be between 1 and 20000 Hz".to_owned(),
+            ))
+        }
+        InputTransport::Rtp {
+            address,
+            port,
+            channels,
+            payload_type,
+            jitter_buffer_ms,
+            multicast_interface,
+            ..
+        } => {
+            validate_host(address)?;
+            validate_audio_channels(*channels)?;
+            validate_port(*port)?;
+            if *payload_type > 127 {
+                return Err(EngineError::InvalidRequest(
+                    "RTP payload_type must be between 0 and 127".to_owned(),
+                ));
+            }
+            if *jitter_buffer_ms > 2000 {
+                return Err(EngineError::InvalidRequest(
+                    "RTP jitter_buffer_ms must not exceed 2000".to_owned(),
+                ));
+            }
+            if multicast_interface
+                .as_deref()
+                .is_some_and(|interface| !is_safe_gst_value(interface))
+            {
+                return Err(EngineError::InvalidRequest(
+                    "multicast_interface contains unsupported characters".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        InputTransport::Srt {
+            host,
+            port,
+            latency_ms,
+            stream_id,
+            passphrase,
+            ..
+        } => {
+            validate_host(host)?;
+            validate_port(*port)?;
+            validate_srt_latency(*latency_ms)?;
+            validate_srt_credentials(stream_id.as_deref(), passphrase.as_deref())?;
+            Ok(())
+        }
+        InputTransport::Alsa {
+            device,
+            sample_rate,
+            channels,
+            bit_depth,
+        } => {
+            validate_alsa_device(device)?;
+            validate_sample_rate(*sample_rate)?;
+            validate_audio_channels(*channels)?;
+            validate_bit_depth(*bit_depth)?;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_output(output: &OutputTransport) -> Result<(), EngineError> {
+    match output {
+        OutputTransport::Alsa {
+            device,
+            sample_rate,
+            channels,
+            bit_depth,
+        } => {
+            validate_alsa_device(device)?;
+            validate_sample_rate(*sample_rate)?;
+            validate_audio_channels(*channels)?;
+            validate_bit_depth(*bit_depth)?;
+            Ok(())
+        }
+        OutputTransport::Rtp {
+            host,
+            port,
+            channels,
+            payload_type,
+            ..
+        } => {
+            validate_host(host)?;
+            validate_port(*port)?;
+            validate_audio_channels(*channels)?;
+            if *payload_type > 127 {
+                return Err(EngineError::InvalidRequest(
+                    "RTP payload_type must be between 0 and 127".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        OutputTransport::Srt {
+            host,
+            port,
+            latency_ms,
+            stream_id,
+            passphrase,
+            pbkeylen,
+            bitrate,
+            ..
+        } => {
+            validate_host(host)?;
+            validate_port(*port)?;
+            validate_srt_latency(*latency_ms)?;
+            validate_srt_credentials(stream_id.as_deref(), passphrase.as_deref())?;
+            if let Some(key_length) = pbkeylen {
+                if ![16, 24, 32].contains(key_length) {
+                    return Err(EngineError::InvalidRequest(
+                        "SRT pbkeylen must be 16, 24, or 32".to_owned(),
+                    ));
+                }
+                if passphrase.as_ref().is_none_or(String::is_empty) {
+                    return Err(EngineError::InvalidRequest(
+                        "an SRT passphrase is required when pbkeylen is set".to_owned(),
+                    ));
+                }
+            }
+            if !(32_000..=512_000).contains(bitrate) {
+                return Err(EngineError::InvalidRequest(
+                    "SRT AAC bitrate must be between 32000 and 512000".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn link_request_pad(
+    source: &gst::Element,
+    source_template: &str,
+    sink: &gst::Element,
+    sink_pad_name: &str,
+) -> Result<(), EngineError> {
+    let source_pad = source
+        .request_pad_simple(source_template)
+        .ok_or_else(|| EngineError::Pipeline("router rejected a source pad".to_owned()))?;
+    let sink_pad = sink
+        .static_pad(sink_pad_name)
+        .ok_or_else(|| EngineError::Pipeline("output queue has no sink pad".to_owned()))?;
+    if let Err(error) = source_pad.link(&sink_pad) {
+        source.release_request_pad(&source_pad);
+        return Err(EngineError::Pipeline(error.to_string()));
+    }
+    Ok(())
+}
+
+fn start_bus_monitor(pipeline: &gst::Pipeline, metrics: Arc<Mutex<LiveMetrics>>) {
+    if let Some(bus) = pipeline.bus() {
+        std::thread::Builder::new()
+            .name("audio-engine-bus".to_owned())
+            .spawn(move || loop {
+                let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(250)) else {
+                    continue;
+                };
+                match message.view() {
+                    gst::MessageView::Error(error) => {
+                        let source = message
+                            .src()
+                            .map(|object| object.name().to_string())
+                            .unwrap_or_else(|| "unknown".to_owned());
+                        tracing::error!(source = %source, error = %error.error(), "GStreamer pipeline error");
+                        if let Ok(mut metrics) = metrics.lock() {
+                            metrics.last_pipeline_error =
+                                Some("GStreamer reported an audio pipeline error".to_owned());
+                        }
+                    }
+                    gst::MessageView::Element(element_message) => {
+                        let Some(structure) = element_message.structure() else {
+                            continue;
+                        };
+                        if structure.name() != "level" {
+                            continue;
+                        }
+                        let Some(source_name) = message.src().map(|object| object.name().to_string())
+                        else {
+                            continue;
+                        };
+                        let Ok(peaks) = structure.get::<gst::glib::ValueArray>("peak") else {
+                            continue;
+                        };
+                        let peaks = peaks
+                            .as_slice()
+                            .iter()
+                            .filter_map(|value| value.get::<f64>().ok())
+                            .collect::<Vec<_>>();
+                        if peaks.is_empty() {
+                            continue;
+                        }
+                        if let Ok(mut metrics) = metrics.lock() {
+                            if source_name == "level-program" {
+                                metrics.program_peaks = Some(peaks);
+                            } else if let Some(id) = source_name
+                                .strip_prefix("level-")
+                                .and_then(|value| Uuid::parse_str(value).ok())
+                            {
+                                metrics.source_peaks.insert(id, peaks);
+                            }
+                            metrics.last_pipeline_error = None;
+                        }
+                    }
+                    _ => {}
+                }
+            })
+            .expect("audio pipeline bus thread could not be started");
+    }
+}
+
+fn jitter_stats(jitter_buffer: &gst::Element) -> (Option<f64>, Option<u64>) {
+    let stats = jitter_buffer.property::<gst::Structure>("stats");
+    let packets_lost = stats.get::<u64>("num-lost").ok().or_else(|| {
+        stats
+            .get::<i32>("num-lost")
+            .ok()
+            .map(|value| value.max(0) as u64)
+    });
+    let jitter_ms = stats
+        .get::<u64>("avg-jitter")
+        .ok()
+        .map(|value| value as f64 / 1_000_000.0)
+        .or_else(|| {
+            stats
+                .get::<i64>("avg-jitter")
+                .ok()
+                .map(|value| value.max(0) as f64 / 1_000_000.0)
+        });
+    (jitter_ms, packets_lost)
+}
+
+fn query_pipeline_latency(pipeline: &gst::Pipeline) -> Option<f64> {
+    let mut query = gst::query::Latency::new();
+    if !pipeline.query(&mut query) {
+        return None;
+    }
+    let (_, minimum, _) = query.result();
+    Some(minimum.mseconds() as f64)
+}
+
+fn state_name(state: gst::State) -> &'static str {
+    match state {
+        gst::State::Playing => "playing",
+        gst::State::Paused => "paused",
+        gst::State::Ready => "ready",
+        gst::State::Null => "stopped",
+        _ => "transitioning",
+    }
+}
+
+fn srt_uri(
+    host: &str,
+    port: u16,
+    mode: SrtMode,
+    latency_ms: u32,
+    stream_id: Option<&str>,
+    passphrase: Option<&str>,
+    pbkeylen: Option<u8>,
+) -> Result<String, EngineError> {
+    validate_host(host)?;
+    validate_port(port)?;
+    validate_srt_latency(latency_ms)?;
+    validate_srt_credentials(stream_id, passphrase)?;
+    let mode = match mode {
+        SrtMode::Caller => "caller",
+        SrtMode::Listener => "listener",
+    };
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query.append_pair("mode", mode);
+    query.append_pair("latency", &latency_ms.to_string());
+    if let Some(stream_id) = stream_id {
+        query.append_pair("streamid", stream_id);
+    }
+    if let Some(passphrase) = passphrase {
+        query.append_pair("passphrase", passphrase);
+    }
+    if let Some(pbkeylen) = pbkeylen {
+        query.append_pair("pbkeylen", &pbkeylen.to_string());
+    }
+    let host = match Host::parse(host) {
+        Ok(Host::Ipv6(address)) => format!("[{address}]"),
+        Ok(Host::Ipv4(address)) => address.to_string(),
+        Ok(Host::Domain(domain)) => domain,
+        Err(_) => {
+            return Err(EngineError::InvalidRequest(
+                "SRT host must be an IPv4, IPv6, or DNS host".to_owned(),
+            ));
+        }
+    };
+    Ok(format!("srt://{host}:{port}?{}", query.finish()))
+}
+
+fn validate_name(name: String) -> Result<String, EngineError> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 100 {
+        return Err(EngineError::InvalidRequest(
+            "name must contain between 1 and 100 characters".to_owned(),
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+fn validate_host(host: &str) -> Result<(), EngineError> {
+    if Host::parse(host).is_err() && host.parse::<IpAddr>().is_err() {
+        return Err(EngineError::InvalidRequest(
+            "host/address must be a valid IP address or DNS host".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_port(port: u16) -> Result<(), EngineError> {
+    if port == 0 {
+        return Err(EngineError::InvalidRequest(
+            "port must be between 1 and 65535".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sample_rate(sample_rate: u32) -> Result<(), EngineError> {
+    if sample_rate != 48_000 {
+        return Err(EngineError::InvalidRequest(
+            "ALSA output sample_rate must be 48000 Hz".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_audio_channels(channels: u8) -> Result<(), EngineError> {
+    if !(1..=2).contains(&channels) {
+        return Err(EngineError::InvalidRequest(
+            "audio channels must be 1 (mono) or 2 (stereo)".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bit_depth(bit_depth: u8) -> Result<(), EngineError> {
+    if ![16, 24].contains(&bit_depth) {
+        return Err(EngineError::InvalidRequest(
+            "audio bit_depth must be 16 or 24".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_srt_latency(latency_ms: u32) -> Result<(), EngineError> {
+    if !(20..=90_000).contains(&latency_ms) {
+        return Err(EngineError::InvalidRequest(
+            "SRT latency_ms must be between 20 and 90000".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_srt_credentials(
+    stream_id: Option<&str>,
+    passphrase: Option<&str>,
+) -> Result<(), EngineError> {
+    if stream_id.is_some_and(|value| value.len() > 512 || value.contains('\0')) {
+        return Err(EngineError::InvalidRequest(
+            "SRT stream_id must not exceed 512 characters".to_owned(),
+        ));
+    }
+    if passphrase.is_some_and(|value| !(10..=79).contains(&value.len())) {
+        return Err(EngineError::InvalidRequest(
+            "SRT passphrase must contain between 10 and 79 characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_alsa_device(device: &str) -> Result<(), EngineError> {
+    if device.is_empty() || device.len() > 128 || !is_safe_gst_value(device) {
+        return Err(EngineError::InvalidRequest(
+            "ALSA device must be a non-empty device identifier".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_safe_gst_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"_-. :,/".contains(&byte))
+}
+
+fn pcm_format(bit_depth: u8, big_endian: bool) -> Result<&'static str, EngineError> {
+    match (bit_depth, big_endian) {
+        (16, false) => Ok("S16LE"),
+        (16, true) => Ok("S16BE"),
+        (24, false) => Ok("S24LE"),
+        (24, true) => Ok("S24BE"),
+        _ => Err(EngineError::InvalidRequest(
+            "audio bit_depth must be 16 or 24".to_owned(),
+        )),
+    }
+}
+
+fn gst_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn sanitize_pipeline_error(error: String) -> String {
+    if error.contains("passphrase=") {
+        "GStreamer rejected the configured pipeline".to_owned()
+    } else {
+        error
+    }
+}
+
+fn default_test_frequency() -> u32 {
+    440
+}
+
+fn default_rtp_address() -> String {
+    "0.0.0.0".to_owned()
+}
+
+fn default_rtp_port() -> u16 {
+    5005
+}
+
+fn default_srt_host() -> String {
+    "0.0.0.0".to_owned()
+}
+
+fn default_srt_latency_ms() -> u32 {
+    120
+}
+
+fn default_srt_output_mode() -> SrtMode {
+    SrtMode::Caller
+}
+
+fn default_channels() -> u8 {
+    2
+}
+
+fn default_payload_type() -> u8 {
+    96
+}
+
+fn default_jitter_buffer_ms() -> u32 {
+    100
+}
+
+fn default_sample_rate() -> u32 {
+    48_000
+}
+
+fn default_bit_depth() -> u8 {
+    24
+}
+
+fn default_aac_bitrate() -> u32 {
+    128_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn srt_uris_apply_role_defaults_and_encode_secrets() {
+        let uri = srt_uri(
+            "127.0.0.1",
+            9000,
+            SrtMode::Listener,
+            120,
+            Some("cloud console"),
+            Some("secret-pass"),
+            Some(16),
+        )
+        .expect("valid SRT URI");
+        assert!(uri.contains("mode=listener"));
+        assert!(uri.contains("streamid=cloud+console"));
+        assert!(uri.contains("passphrase=secret-pass"));
+        assert!(uri.contains("pbkeylen=16"));
+    }
+
+    #[test]
+    fn rejects_invalid_audio_formats_and_transport_settings() {
+        assert!(validate_sample_rate(44_100).is_err());
+        assert!(validate_bit_depth(32).is_err());
+        assert!(validate_audio_channels(3).is_err());
+        assert!(validate_port(0).is_err());
+    }
+
+    #[test]
+    fn errors_and_summaries_do_not_include_secrets() {
+        let error = sanitize_pipeline_error(
+            "pipeline error for srt://host:9000?passphrase=secret".to_owned(),
+        );
+        assert!(!error.contains("secret"));
+        assert_eq!(
+            serde_json::json!({"mode": "caller"})["mode"],
+            serde_json::Value::String("caller".to_owned())
+        );
+    }
+}

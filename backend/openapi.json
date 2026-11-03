@@ -3,7 +3,7 @@
   "info": {
     "title": "Cloud Console API",
     "version": "0.1.0",
-    "description": "Station-scoped API for authentication, configuration, guest links, and operational health."
+    "description": "Station-scoped API for operator access, guest approval, Janus live audio, WHIP/WHEP streaming, configuration, and audio routing."
   },
   "servers": [{ "url": "/api" }],
   "components": {
@@ -36,7 +36,7 @@
         "properties": {
           "authenticated": { "type": "boolean" },
           "station_id": { "type": "string", "format": "uuid" },
-          "role": { "type": "string", "enum": ["station", "guest"] },
+          "role": { "type": "string", "enum": ["station", "guest", "host", "co_host"] },
           "status": { "type": ["string", "null"] }
         }
       },
@@ -68,13 +68,75 @@
       },
       "GuestSession": {
         "type": "object",
-        "required": ["session_id", "status", "access_token", "expires_at"],
+        "required": ["session_id", "display_name", "role", "status", "access_token", "expires_at"],
         "properties": {
           "session_id": { "type": "string", "format": "uuid" },
-          "status": { "type": "string", "const": "pending" },
+          "display_name": { "type": "string" },
+          "role": { "type": "string", "const": "guest" },
+          "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected"] },
           "access_token": { "type": "string", "description": "Guest-scoped JWT." },
           "expires_at": { "type": "string", "format": "date-time" }
         }
+      },
+      "LiveSessionCreate": {
+        "type": "object",
+        "required": ["display_name", "role"],
+        "properties": {
+          "display_name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "role": { "type": "string", "enum": ["host", "co_host"] }
+        }
+      },
+      "LiveSession": {
+        "type": "object",
+        "required": ["id", "display_name", "role", "status", "expires_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "display_name": { "type": "string" },
+          "role": { "type": "string", "enum": ["guest", "host", "co_host"] },
+          "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected", "rejected", "expired"] },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "LiveSessionToken": {
+        "type": "object",
+        "required": ["session_id", "display_name", "role", "status", "access_token", "expires_at"],
+        "properties": {
+          "session_id": { "type": "string", "format": "uuid" },
+          "display_name": { "type": "string" },
+          "role": { "type": "string", "enum": ["host", "co_host"] },
+          "status": { "type": "string", "const": "approved" },
+          "access_token": { "type": "string", "description": "Participant-scoped JWT." },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "GuestSessionStatus": {
+        "type": "object",
+        "required": ["session_id", "display_name", "role", "status", "expires_at"],
+        "properties": {
+          "session_id": { "type": "string", "format": "uuid" },
+          "display_name": { "type": "string" },
+          "role": { "type": "string", "const": "guest" },
+          "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected", "rejected", "expired"] },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "JanusConnection": {
+        "type": "object",
+        "required": ["session_id", "display_name", "role", "websocket_url", "room_id", "room_pin", "ice_servers"],
+        "properties": {
+          "session_id": { "type": "string", "format": "uuid" },
+          "display_name": { "type": "string" },
+          "role": { "type": "string", "enum": ["guest", "host", "co_host"] },
+          "websocket_url": { "type": "string" },
+          "room_id": { "type": "integer" },
+          "room_pin": { "type": "string", "description": "Only returned to approved live sessions." },
+          "ice_servers": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "ConnectionState": {
+        "type": "object",
+        "required": ["state"],
+        "properties": { "state": { "type": "string", "enum": ["connected", "disconnected"] } }
       },
       "StationConfig": {
         "type": "object",
@@ -97,6 +159,201 @@
           "name": { "type": "string" },
           "role": { "type": "string", "enum": ["host", "co_host", "guest", "admin"] },
           "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RtpEncoding": {
+        "type": "string",
+        "enum": ["l16", "l24"]
+      },
+      "SrtMode": {
+        "type": "string",
+        "enum": ["caller", "listener"]
+      },
+      "AudioHealth": {
+        "type": "object",
+        "required": ["status", "gstreamer_version"],
+        "properties": {
+          "status": { "type": "string", "const": "ok" },
+          "gstreamer_version": { "type": "string" }
+        }
+      },
+      "AudioSourceCreate": {
+        "type": "object",
+        "required": ["name", "source_type", "transport"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "source_type": { "type": "string", "enum": ["automation", "aux"] },
+          "transport": { "$ref": "#/components/schemas/InputTransport" }
+        }
+      },
+      "InputTransport": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/TestInputTransport" },
+          { "$ref": "#/components/schemas/RtpInputTransport" },
+          { "$ref": "#/components/schemas/SrtInputTransport" },
+          { "$ref": "#/components/schemas/AlsaInputTransport" }
+        ],
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "test": "#/components/schemas/TestInputTransport",
+            "rtp": "#/components/schemas/RtpInputTransport",
+            "srt": "#/components/schemas/SrtInputTransport",
+            "alsa": "#/components/schemas/AlsaInputTransport"
+          }
+        }
+      },
+      "TestInputTransport": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "const": "test" },
+          "frequency": { "type": "integer", "minimum": 1, "maximum": 20000, "default": 440 }
+        }
+      },
+      "RtpInputTransport": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "const": "rtp" },
+          "address": { "type": "string", "default": "0.0.0.0" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 5005 },
+          "encoding": { "$ref": "#/components/schemas/RtpEncoding", "default": "l24" },
+          "channels": { "type": "integer", "minimum": 1, "maximum": 2, "default": 2 },
+          "payload_type": { "type": "integer", "minimum": 0, "maximum": 127, "default": 96 },
+          "jitter_buffer_ms": { "type": "integer", "minimum": 0, "default": 100 },
+          "multicast_interface": { "type": ["string", "null"] }
+        }
+      },
+      "SrtInputTransport": {
+        "type": "object",
+        "required": ["type", "port"],
+        "properties": {
+          "type": { "type": "string", "const": "srt" },
+          "host": { "type": "string", "default": "0.0.0.0" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "mode": { "$ref": "#/components/schemas/SrtMode", "default": "listener" },
+          "latency_ms": { "type": "integer", "minimum": 20, "maximum": 90000, "default": 120 },
+          "stream_id": { "type": ["string", "null"] },
+          "passphrase": { "type": ["string", "null"], "writeOnly": true }
+        }
+      },
+      "AlsaInputTransport": {
+        "type": "object",
+        "required": ["type", "device"],
+        "properties": {
+          "type": { "type": "string", "const": "alsa" },
+          "device": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "sample_rate": { "type": "integer", "const": 48000, "default": 48000 },
+          "channels": { "type": "integer", "minimum": 1, "maximum": 2, "default": 2 },
+          "bit_depth": { "type": "integer", "enum": [16, 24], "default": 24 }
+        }
+      },
+      "AudioOutputCreate": {
+        "type": "object",
+        "required": ["name", "transport"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "transport": { "$ref": "#/components/schemas/OutputTransport" }
+        }
+      },
+      "OutputTransport": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/AlsaOutputTransport" },
+          { "$ref": "#/components/schemas/RtpOutputTransport" },
+          { "$ref": "#/components/schemas/SrtOutputTransport" }
+        ],
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "alsa": "#/components/schemas/AlsaOutputTransport",
+            "rtp": "#/components/schemas/RtpOutputTransport",
+            "srt": "#/components/schemas/SrtOutputTransport"
+          }
+        }
+      },
+      "AlsaOutputTransport": {
+        "type": "object",
+        "required": ["type", "device"],
+        "properties": {
+          "type": { "type": "string", "const": "alsa" },
+          "device": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "sample_rate": { "type": "integer", "const": 48000, "default": 48000 },
+          "channels": { "type": "integer", "minimum": 1, "maximum": 2, "default": 2 },
+          "bit_depth": { "type": "integer", "enum": [16, 24], "default": 24 }
+        }
+      },
+      "RtpOutputTransport": {
+        "type": "object",
+        "required": ["type", "host", "port"],
+        "properties": {
+          "type": { "type": "string", "const": "rtp" },
+          "host": { "type": "string" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "encoding": { "$ref": "#/components/schemas/RtpEncoding", "default": "l24" },
+          "channels": { "type": "integer", "minimum": 1, "maximum": 2, "default": 2 },
+          "payload_type": { "type": "integer", "minimum": 0, "maximum": 127, "default": 96 }
+        }
+      },
+      "SrtOutputTransport": {
+        "type": "object",
+        "required": ["type", "host", "port"],
+        "properties": {
+          "type": { "type": "string", "const": "srt" },
+          "host": { "type": "string" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "mode": { "$ref": "#/components/schemas/SrtMode", "default": "caller" },
+          "latency_ms": { "type": "integer", "minimum": 20, "maximum": 90000, "default": 120 },
+          "stream_id": { "type": ["string", "null"] },
+          "passphrase": { "type": ["string", "null"], "writeOnly": true },
+          "pbkeylen": { "type": ["integer", "null"], "enum": [16, 24, 32, null] },
+          "bitrate": { "type": "integer", "minimum": 1, "default": 128000 }
+        }
+      },
+      "AudioSource": {
+        "type": "object",
+        "required": ["id", "name", "source_type", "transport", "state"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "source_type": { "type": "string", "enum": ["automation", "aux"] },
+          "transport": { "type": "string", "enum": ["test", "rtp", "srt", "alsa"] },
+          "state": { "type": "string", "enum": ["playing", "paused", "ready", "stopped", "transitioning"] }
+        }
+      },
+      "AudioOutput": {
+        "type": "object",
+        "required": ["id", "name", "transport", "state"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "transport": { "type": "string", "enum": ["rtp", "srt", "alsa"] },
+          "state": { "type": "string", "enum": ["playing", "paused", "ready", "stopped", "transitioning"] }
+        }
+      },
+      "AudioSourceMetrics": {
+        "type": "object",
+        "required": ["id", "state", "peak_dbfs", "jitter_ms", "packets_lost", "configured_latency_ms"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "state": { "type": "string" },
+          "peak_dbfs": { "type": ["array", "null"], "items": { "type": "number" } },
+          "jitter_ms": { "type": ["number", "null"] },
+          "packets_lost": { "type": ["integer", "null"], "minimum": 0 },
+          "configured_latency_ms": { "type": ["integer", "null"], "minimum": 0 }
+        }
+      },
+      "AudioMetrics": {
+        "type": "object",
+        "required": ["pipeline_state", "source_count", "output_count", "program_peak_dbfs", "pipeline_latency_ms", "sources", "last_pipeline_error"],
+        "properties": {
+          "pipeline_state": { "type": "string", "enum": ["playing", "paused", "ready", "stopped", "transitioning"] },
+          "source_count": { "type": "integer", "minimum": 0 },
+          "output_count": { "type": "integer", "minimum": 0 },
+          "program_peak_dbfs": { "type": ["array", "null"], "items": { "type": "number" } },
+          "pipeline_latency_ms": { "type": ["number", "null"] },
+          "sources": { "type": "array", "items": { "$ref": "#/components/schemas/AudioSourceMetrics" } },
+          "last_pipeline_error": { "type": ["string", "null"] }
         }
       }
     }
@@ -199,9 +456,90 @@
           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GuestSessionCreate" } } }
         },
         "responses": {
+          "200": { "description": "Existing guest session resumed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GuestSession" } } } },
           "201": { "description": "Pending guest session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GuestSession" } } } },
           "401": { "description": "Link is invalid or expired", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
           "409": { "description": "Invitation link already has an active session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/live-sessions": {
+      "get": {
+        "summary": "List recent live and guest sessions",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Recent station sessions", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/LiveSession" } } } } }
+        }
+      },
+      "post": {
+        "summary": "Create a host or co-host live session",
+        "security": [{ "StationApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LiveSessionCreate" } } }
+        },
+        "responses": {
+          "201": { "description": "Approved participant session and JWT", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LiveSessionToken" } } } },
+          "400": { "description": "Invalid session details", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/live-sessions/{id}/approve": {
+      "post": {
+        "summary": "Approve a pending guest",
+        "security": [{ "StationApiKey": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "Guest approved", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LiveSession" } } } },
+          "404": { "description": "No pending guest session found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/live-sessions/{id}/reject": {
+      "post": {
+        "summary": "Reject a pending guest",
+        "security": [{ "StationApiKey": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "Guest rejected", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LiveSession" } } } },
+          "404": { "description": "No pending guest session found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/guest-session/{id}": {
+      "get": {
+        "summary": "Read the guest's approval status",
+        "security": [{ "GuestBearer": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "Guest session status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GuestSessionStatus" } } } },
+          "401": { "description": "Guest credential is invalid or revoked", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/live-sessions/{id}/connection": {
+      "get": {
+        "summary": "Get Janus room credentials for an approved participant",
+        "security": [{ "GuestBearer": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "Janus WebSocket and ICE configuration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JanusConnection" } } } },
+          "401": { "description": "Participant credential is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "409": { "description": "Guest approval is pending", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Janus Gateway is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      },
+      "patch": {
+        "summary": "Persist participant connection state",
+        "security": [{ "GuestBearer": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectionState" } } }
+        },
+        "responses": {
+          "200": { "description": "Updated session state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LiveSession" } } } },
+          "401": { "description": "Participant credential is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
         }
       }
     },
@@ -211,6 +549,116 @@
         "security": [{ "StationApiKey": [] }],
         "responses": {
           "200": { "description": "Station users", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/User" } } } } }
+        }
+      }
+    },
+    "/audio/health": {
+      "get": {
+        "summary": "Read audio engine health",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Audio engine is running", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AudioHealth" } } } },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/audio/metrics": {
+      "get": {
+        "summary": "Read audio pipeline metrics",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Audio pipeline metrics", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AudioMetrics" } } } },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/audio/sources": {
+      "get": {
+        "summary": "List audio sources",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Configured audio sources", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/AudioSource" } } } } },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      },
+      "post": {
+        "summary": "Create an audio source",
+        "security": [{ "StationApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AudioSourceCreate" } } }
+        },
+        "responses": {
+          "201": { "description": "Audio source created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AudioSource" } } } },
+          "400": { "description": "Invalid source configuration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "409": { "description": "Source limit reached", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/audio/sources/{id}": {
+      "delete": {
+        "summary": "Remove an audio source",
+        "security": [{ "StationApiKey": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "204": { "description": "Audio source removed" },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Audio source not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/audio/sources/{id}/recover": {
+      "post": {
+        "summary": "Recover an audio source",
+        "security": [{ "StationApiKey": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "Audio source recovered", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AudioSource" } } } },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Audio source not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/audio/outputs": {
+      "get": {
+        "summary": "List audio outputs",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Configured audio outputs", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/AudioOutput" } } } } },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      },
+      "post": {
+        "summary": "Create a Program output",
+        "security": [{ "StationApiKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AudioOutputCreate" } } }
+        },
+        "responses": {
+          "201": { "description": "Program output created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AudioOutput" } } } },
+          "400": { "description": "Invalid output configuration", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/audio/outputs/{id}": {
+      "delete": {
+        "summary": "Remove a Program output",
+        "security": [{ "StationApiKey": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "204": { "description": "Program output removed" },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Program output not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
         }
       }
     }

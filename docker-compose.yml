@@ -1,4 +1,49 @@
 services:
+  audio-engine:
+    build:
+      context: .
+      dockerfile: audio-engine/Dockerfile
+    environment:
+      BIND_ADDRESS: 0.0.0.0:8001
+      RUST_LOG: info
+    ports:
+      - "5005:5005/udp"
+      - "10000-10999:10000-10999/udp"
+    expose:
+      - "8001"
+    restart: unless-stopped
+
+  janus:
+    build:
+      context: .
+      dockerfile: janus/Dockerfile
+    environment:
+      DOCKER_IP: ${JANUS_PUBLIC_ADDRESS:-}
+    ports:
+      - "11000-11999:11000-11999/udp"
+    expose:
+      - "8088"
+      - "8188"
+    restart: unless-stopped
+
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.3
+    environment:
+      MTX_AUTHINTERNALUSERS_0_USER: ${WHIP_WHEP_USERNAME:-cloudconsole-stream}
+      MTX_AUTHINTERNALUSERS_0_PASS: ${WHIP_WHEP_PASSWORD:-local-development-whip-whep-password-change-me}
+      MTX_WEBRTCADDRESS: :8889
+      MTX_WEBRTCLOCALUDPADDRESS: :12000
+      MTX_WEBRTCADDITIONALHOSTS_0: ${JANUS_PUBLIC_ADDRESS:-}
+      MTX_WEBRTCICESERVERS2_0_URL: ${STUN_SERVER:-stun:stun.l.google.com:19302}
+      MTX_WEBRTCICESERVERS2_1_URL: ${TURN_SERVER_URL:-stun:stun.l.google.com:19302}
+      MTX_WEBRTCICESERVERS2_1_USERNAME: ${TURN_SERVER_USERNAME:-}
+      MTX_WEBRTCICESERVERS2_1_PASSWORD: ${TURN_SERVER_CREDENTIAL:-}
+    ports:
+      - "12000:12000/udp"
+    expose:
+      - "8889"
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -8,10 +53,24 @@ services:
       STATION_API_KEY: ${STATION_API_KEY:-local-development-key-change-me}
       GUEST_JWT_SECRET: ${GUEST_JWT_SECRET:-local-development-jwt-secret-change-me}
       STATION_ID: ${STATION_ID:-00000000-0000-0000-0000-000000000001}
+      AUDIO_ENGINE_URL: http://audio-engine:8001
+      JANUS_HTTP_URL: http://janus:8088/janus
+      JANUS_ROOM_ID: ${JANUS_ROOM_ID:-4815162342}
+      JANUS_ROOM_PIN: ${JANUS_ROOM_PIN:-local-development-room-pin-change-me}
+      STUN_SERVER: ${STUN_SERVER:-}
+      TURN_SERVER_URL: ${TURN_SERVER_URL:-}
+      TURN_SERVER_USERNAME: ${TURN_SERVER_USERNAME:-}
+      TURN_SERVER_CREDENTIAL: ${TURN_SERVER_CREDENTIAL:-}
       RUST_LOG: info
     depends_on:
       postgres:
         condition: service_healthy
+      audio-engine:
+        condition: service_started
+      janus:
+        condition: service_started
+      mediamtx:
+        condition: service_started
     expose:
       - "8000"
     restart: unless-stopped
@@ -46,6 +105,8 @@ services:
     depends_on:
       - backend
       - frontend
+      - janus
+      - mediamtx
     ports:
       - "8080:80"
     restart: unless-stopped

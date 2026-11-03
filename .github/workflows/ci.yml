@@ -38,6 +38,24 @@ jobs:
       - run: cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo test --manifest-path backend/Cargo.toml --locked
 
+  audio-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install GStreamer development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: audio-engine
+      - run: cargo fmt --manifest-path audio-engine/Cargo.toml --all -- --check
+      - run: cargo clippy --manifest-path audio-engine/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo test --manifest-path audio-engine/Cargo.toml --locked
+
   containers:
     runs-on: ubuntu-latest
     steps:
@@ -55,6 +73,12 @@ jobs:
           file: frontend/Dockerfile
           push: false
           tags: cloud-console-frontend:ci
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: audio-engine/Dockerfile
+          push: false
+          tags: cloud-console-audio-engine:ci
       - uses: docker/build-push-action@v6
         with:
           context: .
