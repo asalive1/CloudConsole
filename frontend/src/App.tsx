@@ -33,6 +33,16 @@ type LiveSession = {
 };
 
 type Health = { status: string };
+type MixerChannel = {
+  channel_id: string;
+  display_name: string;
+  role: string;
+  fader: number;
+  is_on: boolean;
+  cue_enabled: boolean;
+  muted: boolean;
+  revision: number;
+};
 
 const API_BASE = "/api";
 const PARTICIPANT_KEY = "cloud-console-live-session";
@@ -154,6 +164,7 @@ function StationApp() {
             <p>Station <code>{auth.station_id}</code></p>
             <button type="button" className="secondary" onClick={signOut}>Sign out</button>
           </div>
+          <MixerConsole apiKey={apiKey} />
           {participant && (
             <LiveAudioConnection
               participant={participant}
@@ -177,6 +188,152 @@ function StationApp() {
         <a href="/api/docs">API documentation</a>
       </footer>
     </main>
+  );
+}
+
+function MixerConsole({ apiKey }: { apiKey: string }) {
+  const [channels, setChannels] = useState<MixerChannel[]>([]);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    let retryTimer = 0;
+    let socket: WebSocket | null = null;
+    const connect = () => {
+      const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(
+        `${scheme}//${window.location.host}/api/mixer/ws?api_key=${encodeURIComponent(apiKey)}`,
+      );
+      socket.onmessage = (event: MessageEvent<string>) => {
+        const message = JSON.parse(event.data) as {
+          type: "snapshot" | "update";
+          channels?: MixerChannel[];
+          channel?: MixerChannel;
+        };
+        if (message.type === "snapshot") {
+          setChannels(message.channels ?? []);
+        } else if (message.channel) {
+          const updated = message.channel;
+          setChannels((current) => {
+            const existing = current.find((item) => item.channel_id === updated.channel_id);
+            return existing
+              ? current.map((item) =>
+                  item.channel_id === updated.channel_id ? { ...item, ...updated } : item,
+                )
+              : current;
+          });
+        }
+      };
+      socket.onerror = () => {
+        if (active) setError("Mixer synchronization is unavailable.");
+      };
+      socket.onclose = () => {
+        if (active) retryTimer = window.setTimeout(connect, 1500);
+      };
+    };
+    connect();
+    return () => {
+      active = false;
+      window.clearTimeout(retryTimer);
+      socket?.close();
+    };
+  }, [apiKey]);
+
+  async function updateChannel(channelId: string, update: Partial<MixerChannel>) {
+    setError("");
+    try {
+      const response = await fetch(`${API_BASE}/mixer/channels/${channelId}`, {
+        method: "PATCH",
+        headers: {
+          "X-API-Key": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(update),
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `Mixer update failed (${response.status})`);
+      }
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  }
+
+  return (
+    <section className="panel mixer-panel" aria-labelledby="mixer-title">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">SERVER-SIDE AUDIO</p>
+          <h3 id="mixer-title">Program &amp; Cue mixer</h3>
+        </div>
+        <span className="status-pill">{channels.length} channels</span>
+      </div>
+      <p className="muted">
+        Program uses a server-side mix-minus. Cue is a separate shared bus and remains independent of Program ON/OFF.
+      </p>
+      {channels.length === 0 ? (
+        <p className="muted mixer-empty">Approved host and guest channels appear here.</p>
+      ) : (
+        <div className="mixer-grid">
+          {channels.map((channel) => (
+            <article className="mixer-channel" key={channel.channel_id}>
+              <div className="mixer-channel-heading">
+                <div>
+                  <strong>{channel.display_name}</strong>
+                  <span>{channel.role.replace("_", " ")}</span>
+                </div>
+                <span className={`status-pill ${channel.is_on && !channel.muted ? "active" : ""}`}>
+                  {channel.is_on && !channel.muted ? "ON" : "OFF"}
+                </span>
+              </div>
+              <label className="mixer-fader">
+                Program fader
+                <input
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.01"
+                  value={channel.fader}
+                  onChange={(event) =>
+                    void updateChannel(channel.channel_id, { fader: Number(event.target.value) })
+                  }
+                />
+              </label>
+              <div className="inline-actions">
+                <button
+                  type="button"
+                  className={channel.is_on ? "secondary" : ""}
+                  onClick={() =>
+                    void updateChannel(channel.channel_id, { is_on: !channel.is_on })
+                  }
+                >
+                  {channel.is_on ? "Program ON" : "Program OFF"}
+                </button>
+                <button
+                  type="button"
+                  className={channel.cue_enabled ? "" : "secondary"}
+                  onClick={() =>
+                    void updateChannel(channel.channel_id, { cue_enabled: !channel.cue_enabled })
+                  }
+                >
+                  {channel.cue_enabled ? "Cue ON" : "Cue OFF"}
+                </button>
+                <button
+                  type="button"
+                  className={channel.muted ? "" : "secondary"}
+                  onClick={() =>
+                    void updateChannel(channel.channel_id, { muted: !channel.muted })
+                  }
+                >
+                  {channel.muted ? "Unmute" : "Mute"}
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+      {error && <p className="error" role="alert">{error}</p>}
+    </section>
   );
 }
 

@@ -56,6 +56,7 @@ services:
       AUDIO_ENGINE_URL: http://audio-engine:8001
       JANUS_HTTP_URL: http://janus:8088/janus
       JANUS_ROOM_ID: ${JANUS_ROOM_ID:-4815162342}
+      JANUS_CUE_ROOM_ID: ${JANUS_CUE_ROOM_ID:-}
       JANUS_ROOM_PIN: ${JANUS_ROOM_PIN:-local-development-room-pin-change-me}
       STUN_SERVER: ${STUN_SERVER:-}
       TURN_SERVER_URL: ${TURN_SERVER_URL:-}

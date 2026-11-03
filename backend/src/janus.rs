@@ -50,7 +50,7 @@ async fn ensure_room_in_session(
         &session_url,
         json!({
             "janus": "attach",
-            "plugin": "janus.plugin.videoroom",
+            "plugin": "janus.plugin.audiobridge",
             "transaction": Uuid::new_v4().to_string()
         }),
     )
@@ -82,10 +82,12 @@ async fn ensure_room_in_session(
             "request": "create",
             "room": room_id,
             "description": "Cloud Console live audio",
-            "publishers": 8,
+            "max_participants": 14,
             "pin": pin,
             "is_private": true,
-            "audiocodec": "opus",
+            "sampling_rate": 48000,
+            "use_limiter": true,
+            "allow_rtp_participants": true,
             "permanent": false
         }),
     )

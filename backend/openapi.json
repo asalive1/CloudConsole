@@ -3,7 +3,7 @@
   "info": {
     "title": "Cloud Console API",
     "version": "0.1.0",
-    "description": "Station-scoped API for operator access, guest approval, Janus live audio, WHIP/WHEP streaming, configuration, and audio routing."
+    "description": "Station-scoped API for operator access, guest approval, Janus Program/Cue audio, mixer state, WHIP/WHEP streaming, configuration, and audio routing."
   },
   "servers": [{ "url": "/api" }],
   "components": {
@@ -571,6 +571,33 @@
           "200": { "description": "Audio pipeline metrics", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AudioMetrics" } } } },
           "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
           "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/mixer/channels": {
+      "get": {
+        "summary": "List active station mixer channels",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Mixer channels and current fader, Program, Cue, and mute state", "content": { "application/json": { "schema": { "type": "array", "items": { "type": "object", "required": ["channel_id", "display_name", "role", "fader", "is_on", "cue_enabled", "muted", "revision"], "properties": { "channel_id": { "type": "string", "format": "uuid" }, "display_name": { "type": "string" }, "role": { "type": "string" }, "fader": { "type": "number", "minimum": 0, "maximum": 2 }, "is_on": { "type": "boolean" }, "cue_enabled": { "type": "boolean" }, "muted": { "type": "boolean" }, "revision": { "type": "integer" } } } } } } },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/mixer/channels/{id}": {
+      "patch": {
+        "summary": "Update a station mixer channel",
+        "security": [{ "StationApiKey": [] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "minProperties": 1, "properties": { "fader": { "type": "number", "minimum": 0, "maximum": 2 }, "is_on": { "type": "boolean" }, "cue_enabled": { "type": "boolean" }, "muted": { "type": "boolean" } } } } }
+        },
+        "responses": {
+          "200": { "description": "Updated mixer channel state", "content": { "application/json": { "schema": { "type": "object", "required": ["channel_id", "fader", "is_on", "cue_enabled", "muted", "revision"], "properties": { "channel_id": { "type": "string", "format": "uuid" }, "fader": { "type": "number" }, "is_on": { "type": "boolean" }, "cue_enabled": { "type": "boolean" }, "muted": { "type": "boolean" }, "revision": { "type": "integer" } } } } } },
+          "400": { "description": "Mixer settings are invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Channel is not active", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
         }
       }
     },

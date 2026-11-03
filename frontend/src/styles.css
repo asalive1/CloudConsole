@@ -69,6 +69,16 @@ select { width: 100%; padding: 12px 13px; border: 1px solid #35445a; border-radi
 .invitation-created p { color: #a7f3d0; font-size: 12px; }
 .invitation-created code { overflow-wrap: anywhere; color: #d1fae5; font-size: 11px; }
 .live-panel { max-width: none; margin-bottom: 16px; }
+.mixer-panel { max-width: none; margin-bottom: 16px; }
+.mixer-empty { margin-top: 18px; }
+.mixer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 18px; }
+.mixer-channel { display: grid; gap: 14px; padding: 14px; border: 1px solid #29364a; border-radius: 10px; background: #0d1626; }
+.mixer-channel-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.mixer-channel-heading > div { display: grid; gap: 4px; }
+.mixer-channel-heading strong { color: #e2e8f0; font-size: 13px; }
+.mixer-channel-heading span:not(.status-pill) { color: #8491a5; font-size: 11px; text-transform: capitalize; }
+.mixer-fader { display: grid; gap: 8px; color: #cbd5e1; font-size: 12px; }
+.mixer-fader input { width: 100%; padding: 0; accent-color: #10b981; }
 .live-description { margin-bottom: 15px; }
 .audio-controls { margin-top: 12px; }
 .volume-control { display: flex; align-items: center; gap: 10px; color: #cbd5e1; font-size: 12px; }

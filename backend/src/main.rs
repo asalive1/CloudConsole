@@ -3,7 +3,7 @@ use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
 use axum::{routing::get, Router};
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -20,9 +20,11 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub janus_http_url: String,
     pub janus_room_id: u64,
+    pub janus_cue_room_id: u64,
     pub janus_room_pin: String,
     pub janus_ice_servers: Vec<Value>,
     pub janus_room_lock: Arc<Mutex<()>>,
+    pub mixer_updates: broadcast::Sender<Value>,
 }
 
 #[tokio::main]
@@ -48,6 +50,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "local-development-room-pin-change-me".to_owned());
     if janus_room_pin.len() < 12 {
         return Err("JANUS_ROOM_PIN must contain at least 12 characters".into());
+    }
+    let janus_cue_room_id = match env::var("JANUS_CUE_ROOM_ID") {
+        Ok(value) if !value.trim().is_empty() => value.parse::<u64>()?,
+        _ => janus_room_id
+            .checked_add(1)
+            .ok_or("JANUS_ROOM_ID is too large")?,
+    };
+    if janus_cue_room_id == janus_room_id {
+        return Err("JANUS_CUE_ROOM_ID must differ from JANUS_ROOM_ID".into());
     }
 
     let mut janus_ice_servers = Vec::new();
@@ -80,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .execute(&pool)
     .await?;
 
+    let (mixer_updates, _) = broadcast::channel(128);
     let state = AppState {
         pool,
         station_id,
@@ -91,9 +103,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         janus_http_url: env::var("JANUS_HTTP_URL")
             .unwrap_or_else(|_| "http://janus:8088/janus".to_owned()),
         janus_room_id,
+        janus_cue_room_id,
         janus_room_pin,
         janus_ice_servers,
         janus_room_lock: Arc::new(Mutex::new(())),
+        mixer_updates,
     };
     let app = Router::new()
         .route("/api/health", get(routes::health))
@@ -138,6 +152,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(routes::get_guest_session),
         )
         .route("/api/users", get(routes::list_users))
+        .route(
+            "/api/mixer/channels",
+            get(routes::list_mixer_channels),
+        )
+        .route(
+            "/api/mixer/channels/{id}",
+            axum::routing::patch(routes::update_mixer_channel),
+        )
+        .route("/api/mixer/ws", get(routes::mixer_websocket))
         .route("/api/audio/{*path}", axum::routing::any(routes::proxy_audio))
         .with_state(state)
         .layer(

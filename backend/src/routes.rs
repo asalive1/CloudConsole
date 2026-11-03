@@ -1,6 +1,9 @@
 use axum::{
     body::{to_bytes, Body},
-    extract::{OriginalUri, Path, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        OriginalUri, Path, Query, State,
+    },
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -722,6 +725,14 @@ pub async fn get_live_connection(
     )
     .await
     .map_err(ApiError::Janus)?;
+    crate::janus::ensure_audio_room(
+        &state.http_client,
+        &state.janus_http_url,
+        state.janus_cue_room_id,
+        &state.janus_room_pin,
+    )
+    .await
+    .map_err(ApiError::Janus)?;
 
     Ok(Json(json!({
         "session_id": id,
@@ -729,9 +740,252 @@ pub async fn get_live_connection(
         "role": claims.role,
         "websocket_url": "",
         "room_id": state.janus_room_id,
+        "cue_room_id": state.janus_cue_room_id,
         "room_pin": state.janus_room_pin,
         "ice_servers": state.janus_ice_servers
     })))
+}
+
+pub async fn list_mixer_channels(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    authorize_station(&headers, &state)?;
+    Ok(Json(load_mixer_channels(&state).await?))
+}
+
+#[derive(Deserialize)]
+pub struct MixerChannelRequest {
+    fader: Option<f64>,
+    is_on: Option<bool>,
+    cue_enabled: Option<bool>,
+    muted: Option<bool>,
+}
+
+pub async fn update_mixer_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(request): Json<MixerChannelRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_station(&headers, &state)?;
+    if request.fader.is_none()
+        && request.is_on.is_none()
+        && request.cue_enabled.is_none()
+        && request.muted.is_none()
+    {
+        return Err(ApiError::InvalidRequest(
+            "at least one mixer setting must be provided".to_owned(),
+        ));
+    }
+    if request
+        .fader
+        .is_some_and(|fader| !fader.is_finite() || !(0.0..=2.0).contains(&fader))
+    {
+        return Err(ApiError::InvalidRequest(
+            "fader must be between 0 and 2".to_owned(),
+        ));
+    }
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND station_id = $2 AND status IN ('approved', 'connected', 'disconnected') AND expires_at > NOW())",
+    )
+    .bind(id)
+    .bind(state.station_id)
+    .fetch_one(&state.pool)
+    .await?;
+    if !active {
+        return Err(ApiError::NotFound);
+    }
+
+    let row = sqlx::query(
+        "INSERT INTO mixer_channels (station_id, channel_id, fader, is_on, cue_enabled, muted) VALUES ($1, $2, COALESCE($3, 1.0), COALESCE($4, TRUE), COALESCE($5, FALSE), COALESCE($6, FALSE)) ON CONFLICT (station_id, channel_id) DO UPDATE SET fader = COALESCE($3, mixer_channels.fader), is_on = COALESCE($4, mixer_channels.is_on), cue_enabled = COALESCE($5, mixer_channels.cue_enabled), muted = COALESCE($6, mixer_channels.muted), revision = mixer_channels.revision + 1, updated_at = NOW() RETURNING channel_id, fader, is_on, cue_enabled, muted, revision",
+    )
+    .bind(state.station_id)
+    .bind(id)
+    .bind(request.fader)
+    .bind(request.is_on)
+    .bind(request.cue_enabled)
+    .bind(request.muted)
+    .fetch_one(&state.pool)
+    .await?;
+    let channel = mixer_channel_value(
+        row.get("channel_id"),
+        row.get("fader"),
+        row.get("is_on"),
+        row.get("cue_enabled"),
+        row.get("muted"),
+        row.get("revision"),
+    );
+    let _ = state.mixer_updates.send(channel.clone());
+    Ok(Json(channel))
+}
+
+pub async fn mixer_websocket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MixerSocketQuery>,
+    websocket: WebSocketUpgrade,
+) -> Result<impl IntoResponse, ApiError> {
+    let participant_id = if let Some(token) = query.token {
+        let claims = decode_participant_token(&token, &state)?;
+        let id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sessions s LEFT JOIN guest_links gl ON gl.id = s.guest_link_id AND gl.station_id = s.station_id WHERE s.id = $1 AND s.station_id = $2 AND s.role = $3 AND s.status IN ('approved', 'connected', 'disconnected') AND s.expires_at > NOW() AND (s.guest_link_id IS NULL OR (gl.invalidated_at IS NULL AND gl.expires_at > NOW())))",
+        )
+        .bind(id)
+        .bind(state.station_id)
+        .bind(&claims.role)
+        .fetch_one(&state.pool)
+        .await?;
+        if !active {
+            return Err(ApiError::Unauthorized);
+        }
+        Some(id)
+    } else {
+        if let Some(api_key) = query.api_key.as_deref() {
+            if api_key
+                .as_bytes()
+                .ct_eq(state.station_api_key.as_bytes())
+                .unwrap_u8()
+                != 1
+            {
+                return Err(ApiError::Unauthorized);
+            }
+        } else {
+            authorize_station(&headers, &state)?;
+        }
+        None
+    };
+    Ok(websocket.on_upgrade(move |socket| handle_mixer_websocket(socket, state, participant_id)))
+}
+
+#[derive(Deserialize)]
+pub struct MixerSocketQuery {
+    token: Option<String>,
+    api_key: Option<String>,
+}
+
+async fn handle_mixer_websocket(
+    mut socket: WebSocket,
+    state: AppState,
+    participant_id: Option<Uuid>,
+) {
+    let mut updates = state.mixer_updates.subscribe();
+    match load_mixer_channels(&state).await {
+        Ok(channels) => {
+            let channels: Vec<_> = channels
+                .into_iter()
+                .filter(|channel| {
+                    participant_id.is_none()
+                        || channel["channel_id"].as_str()
+                            == participant_id.map(|id| id.to_string()).as_deref()
+                })
+                .collect();
+            let snapshot = json!({ "type": "snapshot", "channels": channels });
+            if socket
+                .send(Message::Text(snapshot.to_string().into()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load mixer snapshot");
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    }
+    loop {
+        match updates.recv().await {
+            Ok(channel) => {
+                if participant_id.is_some()
+                    && channel["channel_id"].as_str()
+                        != participant_id.map(|id| id.to_string()).as_deref()
+                {
+                    continue;
+                }
+                let message = json!({ "type": "update", "channel": channel });
+                if socket
+                    .send(Message::Text(message.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                tracing::warn!(count, "mixer websocket client missed updates");
+                match load_mixer_channels(&state).await {
+                    Ok(channels) => {
+                        let channels: Vec<_> = channels
+                            .into_iter()
+                            .filter(|channel| {
+                                participant_id.is_none()
+                                    || channel["channel_id"].as_str()
+                                        == participant_id.map(|id| id.to_string()).as_deref()
+                            })
+                            .collect();
+                        let snapshot = json!({ "type": "snapshot", "channels": channels });
+                        if socket
+                            .send(Message::Text(snapshot.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to refresh mixer snapshot");
+                        break;
+                    }
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+async fn load_mixer_channels(state: &AppState) -> Result<Vec<Value>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT s.id, s.display_name, s.role, COALESCE(mc.fader, 1.0) AS fader, COALESCE(mc.is_on, TRUE) AS is_on, COALESCE(mc.cue_enabled, FALSE) AS cue_enabled, COALESCE(mc.muted, FALSE) AS muted, COALESCE(mc.revision, 0) AS revision FROM sessions s LEFT JOIN mixer_channels mc ON mc.station_id = s.station_id AND mc.channel_id = s.id WHERE s.station_id = $1 AND s.status IN ('approved', 'connected', 'disconnected') AND s.expires_at > NOW() ORDER BY s.created_at",
+    )
+    .bind(state.station_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "channel_id": row.get::<Uuid, _>("id"),
+                "display_name": row.get::<String, _>("display_name"),
+                "role": row.get::<String, _>("role"),
+                "fader": row.get::<f64, _>("fader"),
+                "is_on": row.get::<bool, _>("is_on"),
+                "cue_enabled": row.get::<bool, _>("cue_enabled"),
+                "muted": row.get::<bool, _>("muted"),
+                "revision": row.get::<i64, _>("revision")
+            })
+        })
+        .collect())
+}
+
+fn mixer_channel_value(
+    channel_id: Uuid,
+    fader: f64,
+    is_on: bool,
+    cue_enabled: bool,
+    muted: bool,
+    revision: i64,
+) -> Value {
+    json!({
+        "channel_id": channel_id,
+        "fader": fader,
+        "is_on": is_on,
+        "cue_enabled": cue_enabled,
+        "muted": muted,
+        "revision": revision
+    })
 }
 
 pub async fn janus_websocket_auth(
