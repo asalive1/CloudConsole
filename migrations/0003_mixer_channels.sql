@@ -1,4 +1,4 @@
-CREATE TABLE mixer_channels (
+CREATE TABLE mixer_channel_state (
     station_id UUID NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
     channel_id UUID NOT NULL,
     fader DOUBLE PRECISION NOT NULL DEFAULT 1.0 CHECK (fader >= 0.0 AND fader <= 2.0),

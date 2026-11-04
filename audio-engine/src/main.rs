@@ -72,6 +72,7 @@ struct HealthResponse {
 
 #[derive(Deserialize)]
 struct CreateSourceRequest {
+    id: Option<Uuid>,
     name: String,
     source_type: pipeline::SourceType,
     transport: pipeline::InputTransport,
@@ -88,6 +89,7 @@ struct SourceResponse {
 
 #[derive(Deserialize)]
 struct CreateOutputRequest {
+    id: Option<Uuid>,
     name: String,
     transport: pipeline::OutputTransport,
 }
@@ -103,6 +105,12 @@ struct OutputResponse {
 #[derive(Deserialize)]
 struct ConfigureDelayRequest {
     delay_seconds: u32,
+}
+
+#[derive(Deserialize)]
+struct SourceMixRequest {
+    volume: f64,
+    muted: bool,
 }
 
 #[tokio::main]
@@ -127,6 +135,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/delay/config", patch(configure_delay))
         .route("/delay/dump", post(dump_delay))
         .route("/delay/end", post(end_delay))
+        .route("/delay/build", post(build_delay))
+        .route("/sources/{id}/mix", patch(set_source_mix))
         .route("/sources", get(list_sources).post(create_source))
         .route("/sources/{id}", delete(remove_source))
         .route("/sources/{id}/recover", post(recover_source))
@@ -182,6 +192,28 @@ async fn end_delay(State(state): State<AppState>) -> Result<Json<DelayStatus>, A
     Ok(Json(state.engine.lock().await.end_delay()?))
 }
 
+async fn build_delay(State(state): State<AppState>) -> Result<Json<DelayStatus>, ApiError> {
+    Ok(Json(state.engine.lock().await.build_delay()?))
+}
+
+async fn set_source_mix(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<SourceMixRequest>,
+) -> Result<StatusCode, ApiError> {
+    if !request.volume.is_finite() {
+        return Err(
+            EngineError::InvalidRequest("volume must be a finite number".to_owned()).into(),
+        );
+    }
+    state
+        .engine
+        .lock()
+        .await
+        .set_source_mix(id, request.volume, request.muted)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn list_sources(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SourceResponse>>, ApiError> {
@@ -206,7 +238,12 @@ async fn create_source(
     Json(request): Json<CreateSourceRequest>,
 ) -> Result<(StatusCode, Json<SourceResponse>), ApiError> {
     let mut engine = state.engine.lock().await;
-    let source = engine.add_source(request.name, request.source_type, request.transport)?;
+    let source = engine.add_source_with_id(
+        request.id.unwrap_or_else(Uuid::new_v4),
+        request.name,
+        request.source_type,
+        request.transport,
+    )?;
     Ok((
         StatusCode::CREATED,
         Json(SourceResponse {
@@ -264,7 +301,11 @@ async fn create_output(
     Json(request): Json<CreateOutputRequest>,
 ) -> Result<(StatusCode, Json<OutputResponse>), ApiError> {
     let mut engine = state.engine.lock().await;
-    let output = engine.add_output(request.name, request.transport)?;
+    let output = engine.add_output_with_id(
+        request.id.unwrap_or_else(Uuid::new_v4),
+        request.name,
+        request.transport,
+    )?;
     Ok((
         StatusCode::CREATED,
         Json(OutputResponse {

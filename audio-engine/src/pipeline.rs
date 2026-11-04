@@ -413,16 +413,7 @@ impl AudioEngine {
         })
     }
 
-    pub fn add_source(
-        &mut self,
-        name: String,
-        source_type: SourceType,
-        input: InputTransport,
-    ) -> Result<SourceSummary, EngineError> {
-        self.add_source_with_id(Uuid::new_v4(), name, source_type, input)
-    }
-
-    fn add_source_with_id(
+    pub fn add_source_with_id(
         &mut self,
         id: Uuid,
         name: String,
@@ -544,14 +535,14 @@ impl AudioEngine {
             .expect("recovered source was just inserted"))
     }
 
-    pub fn add_output(
+    pub fn add_output_with_id(
         &mut self,
+        id: Uuid,
         name: String,
         transport: OutputTransport,
     ) -> Result<OutputSummary, EngineError> {
         let name = validate_name(name)?;
         validate_output(&transport)?;
-        let id = Uuid::new_v4();
         let transport_name = transport.transport_name();
         let description = transport.gst_description()?;
         let bin = gst::parse::bin_from_description(&description, true)
@@ -729,6 +720,39 @@ impl AudioEngine {
         let mut status = delay_status(&delay);
         status.state = DelayMode::Dumped;
         Ok(status)
+    }
+
+    pub fn build_delay(&mut self) -> Result<DelayStatus, EngineError> {
+        let mut delay = self
+            .delay_state
+            .lock()
+            .map_err(|_| EngineError::Pipeline("delay state lock is poisoned".to_owned()))?;
+        let target = delay.configured_delay_seconds;
+        if delay.buffered_delay_seconds + 0.05 >= f64::from(target) {
+            return Err(EngineError::Conflict(
+                "the delay buffer is already built".to_owned(),
+            ));
+        }
+        self.delay_queue.set_property("min-threshold-time", 0u64);
+        self.delay_pitch.set_property("tempo", 0.95f32);
+        delay.target_delay_seconds = target;
+        delay.last_micro_skip = Instant::now();
+        delay.state = DelayMode::Rebuilding;
+        Ok(delay_status(&delay))
+    }
+
+    pub fn set_source_mix(
+        &mut self,
+        id: Uuid,
+        volume: f64,
+        muted: bool,
+    ) -> Result<(), EngineError> {
+        let source = self.sources.get(&id).ok_or(EngineError::NotFound)?;
+        source
+            .mixer_pad
+            .set_property("volume", volume.clamp(0.0, 2.0));
+        source.mixer_pad.set_property("mute", muted);
+        Ok(())
     }
 
     pub fn end_delay(&mut self) -> Result<DelayStatus, EngineError> {

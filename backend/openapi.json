@@ -743,6 +743,38 @@
         }
       }
     },
+    "/delay/build": {
+      "post": {
+        "summary": "Build the Program delay buffer up to the configured time",
+        "security": [{ "StationApiKey": [] }, { "GuestBearer": [] }],
+        "responses": {
+          "200": { "description": "Delay build started", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DelayStatus" } } } },
+          "401": { "description": "Credential is invalid or does not have delay-control permission", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "409": { "description": "Delay is already built", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/monitor": {
+      "get": {
+        "summary": "Get monitor source settings for the local user and guest links",
+        "security": [{ "StationApiKey": [] }],
+        "responses": {
+          "200": { "description": "Current monitor settings", "content": { "application/json": { "schema": { "type": "object", "properties": { "local_source": { "type": "string", "enum": ["cue", "program_mix", "mix_minus", "input"] }, "local_input_id": { "type": "string", "format": "uuid", "nullable": true }, "local_volume": { "type": "number" }, "local_muted": { "type": "boolean" }, "guest_source": { "type": "string", "enum": ["cue", "program_mix", "mix_minus", "input"] }, "guest_input_id": { "type": "string", "format": "uuid", "nullable": true } } } } } },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      },
+      "put": {
+        "summary": "Update monitor source settings (any subset of fields)",
+        "security": [{ "StationApiKey": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "local_source": { "type": "string" }, "local_input_id": { "type": "string", "format": "uuid" }, "local_volume": { "type": "number" }, "local_muted": { "type": "boolean" }, "guest_source": { "type": "string" }, "guest_input_id": { "type": "string", "format": "uuid" } } } } } },
+        "responses": {
+          "200": { "description": "Updated monitor settings" },
+          "400": { "description": "Invalid monitor setting", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "401": { "description": "Station API key is invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
     "/delay/end": {
       "post": {
         "summary": "Gradually return Program output to live audio",

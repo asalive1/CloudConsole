@@ -7,6 +7,7 @@ use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod engine_sync;
 mod janus;
 mod routes;
 
@@ -116,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mixer_updates,
     };
     routes::restore_delay_settings(&state).await?;
+    tokio::spawn(engine_sync::run(state.clone()));
     let app = Router::new()
         .route("/api/health", get(routes::health))
         .route("/api/ready", get(routes::ready))
@@ -181,6 +183,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/delay/dump", axum::routing::post(routes::dump_delay))
         .route("/api/delay/end", axum::routing::post(routes::end_delay))
+        .route("/api/delay/build", axum::routing::post(routes::build_delay))
+        .route("/api/monitor", get(routes::get_monitor_settings).put(routes::update_monitor_settings))
         .route(
             "/api/mixer/channels",
             get(routes::list_mixer_channels),

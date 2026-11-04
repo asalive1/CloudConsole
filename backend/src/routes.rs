@@ -186,6 +186,16 @@ pub async fn dump_delay(
     ))
 }
 
+pub async fn build_delay(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_delay_operator(&headers, &state).await?;
+    Ok(Json(
+        delay_engine_request(&state, reqwest::Method::POST, "/build", None).await?,
+    ))
+}
+
 pub async fn end_delay(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -515,6 +525,68 @@ fn validate_station_resource(request: &StationResourceRequest, kind: &str) -> Re
             "metadata direction and format must be provided together".to_owned(),
         ));
     }
+    match kind {
+        "inputs" => {
+            if let Some(resource_type) = request.resource_type.as_deref() {
+                if !matches!(resource_type.trim(), "automation" | "aux") {
+                    return Err(ApiError::InvalidRequest(
+                        "input type must be automation or aux".to_owned(),
+                    ));
+                }
+            }
+            validate_transport_type(request.config.as_ref(), &["alsa", "srt", "rtp", "test"])?;
+        }
+        "outputs" => {
+            if let Some(resource_type) = request.resource_type.as_deref() {
+                if !matches!(resource_type.trim(), "alsa" | "srt" | "rtp") {
+                    return Err(ApiError::InvalidRequest(
+                        "output type must be alsa, srt, or rtp".to_owned(),
+                    ));
+                }
+            }
+            validate_transport_type(request.config.as_ref(), &["alsa", "srt", "rtp"])?;
+        }
+        "metadata" => validate_metadata_config(request.config.as_ref())?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_transport_type(config: Option<&Value>, allowed: &[&str]) -> Result<(), ApiError> {
+    let Some(config) = config else { return Ok(()) };
+    match config.get("type").and_then(Value::as_str) {
+        Some(kind) if allowed.contains(&kind) => Ok(()),
+        _ => Err(ApiError::InvalidRequest(format!(
+            "config.type must be one of: {}",
+            allowed.join(", ")
+        ))),
+    }
+}
+
+fn validate_metadata_config(config: Option<&Value>) -> Result<(), ApiError> {
+    let Some(config) = config else { return Ok(()) };
+    let mode = config.get("mode").and_then(Value::as_str);
+    if !matches!(mode, Some("server" | "client")) {
+        return Err(ApiError::InvalidRequest(
+            "metadata mode must be server or client".to_owned(),
+        ));
+    }
+    let port = config.get("port").and_then(Value::as_u64);
+    if !port.is_some_and(|port| (1..=65535).contains(&port)) {
+        return Err(ApiError::InvalidRequest(
+            "metadata port must be between 1 and 65535".to_owned(),
+        ));
+    }
+    if mode == Some("client")
+        && config
+            .get("host")
+            .and_then(Value::as_str)
+            .is_none_or(|host| host.trim().is_empty() || host.len() > 253)
+    {
+        return Err(ApiError::InvalidRequest(
+            "metadata client mode requires a host".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -552,6 +624,23 @@ pub async fn create_station_resource(
                 .resource_type
                 .as_deref()
                 .ok_or_else(|| ApiError::InvalidRequest("resource_type is required".to_owned()))?;
+            if config.0.get("type").is_none() {
+                return Err(ApiError::InvalidRequest(
+                    "config.type is required".to_owned(),
+                ));
+            }
+            let existing: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM inputs WHERE station_id = $1 AND source_type = $2",
+            )
+            .bind(state.station_id)
+            .bind(resource_type.trim())
+            .fetch_one(&state.pool)
+            .await?;
+            if (resource_type.trim() == "automation" && existing >= 1) || existing >= 5 {
+                return Err(ApiError::Conflict(
+                    "a station supports one Automation input and up to five AUX inputs".to_owned(),
+                ));
+            }
             sqlx::query(
                 "INSERT INTO inputs (id, station_id, name, source_type, enabled, config) VALUES ($1, $2, $3, $4, $5, $6)",
             )
@@ -617,6 +706,7 @@ pub async fn create_station_resource(
         }
         _ => return Err(ApiError::NotFound),
     }
+    sync_engine_resource(&state, &kind, id, false).await;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
@@ -699,7 +789,21 @@ pub async fn update_station_resource(
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    sync_engine_resource(&state, &kind, id, false).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn sync_engine_resource(state: &AppState, kind: &str, id: Uuid, removed: bool) {
+    let result = match (kind, removed) {
+        ("inputs", false) => crate::engine_sync::apply_input(state, id).await,
+        ("inputs", true) => crate::engine_sync::remove_input(state, id).await,
+        ("outputs", false) => crate::engine_sync::apply_output(state, id).await,
+        ("outputs", true) => crate::engine_sync::remove_output(state, id).await,
+        _ => return,
+    };
+    if let Err(error) = result {
+        tracing::warn!(kind, %id, %error, "audio engine did not accept the configuration yet");
+    }
 }
 
 pub async fn delete_station_resource(
@@ -723,6 +827,14 @@ pub async fn delete_station_resource(
         .await?;
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound);
+    }
+    sync_engine_resource(&state, &kind, id, true).await;
+    if kind == "inputs" {
+        sqlx::query("DELETE FROM mixer_channel_state WHERE station_id = $1 AND channel_id = $2")
+            .bind(state.station_id)
+            .bind(id)
+            .execute(&state.pool)
+            .await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1172,7 +1284,7 @@ pub async fn disconnect_guest_session(
     .await?
     .ok_or(ApiError::NotFound)?;
     let channel = sqlx::query(
-        "INSERT INTO mixer_channels (station_id, channel_id, muted) VALUES ($1, $2, TRUE) ON CONFLICT (station_id, channel_id) DO UPDATE SET muted = TRUE, revision = mixer_channels.revision + 1, updated_at = NOW() RETURNING channel_id, fader, is_on, cue_enabled, muted, revision",
+        "INSERT INTO mixer_channel_state (station_id, channel_id, muted) VALUES ($1, $2, TRUE) ON CONFLICT (station_id, channel_id) DO UPDATE SET muted = TRUE, revision = mixer_channel_state.revision + 1, updated_at = NOW() RETURNING channel_id, fader, is_on, cue_enabled, muted, revision",
     )
     .bind(state.station_id)
     .bind(id)
@@ -1325,19 +1437,27 @@ pub async fn update_mixer_channel(
             "fader must be between 0 and 2".to_owned(),
         ));
     }
-    let active: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND station_id = $2 AND status IN ('approved', 'connected', 'disconnected') AND expires_at > NOW())",
+    let is_input: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM inputs WHERE id = $1 AND station_id = $2 AND enabled)",
     )
     .bind(id)
     .bind(state.station_id)
     .fetch_one(&state.pool)
     .await?;
+    let active: bool = is_input
+        || sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND station_id = $2 AND status IN ('approved', 'connected', 'disconnected') AND expires_at > NOW())",
+        )
+        .bind(id)
+        .bind(state.station_id)
+        .fetch_one(&state.pool)
+        .await?;
     if !active {
         return Err(ApiError::NotFound);
     }
 
     let row = sqlx::query(
-        "INSERT INTO mixer_channels (station_id, channel_id, fader, is_on, cue_enabled, muted) VALUES ($1, $2, COALESCE($3, 1.0), COALESCE($4, TRUE), COALESCE($5, FALSE), COALESCE($6, FALSE)) ON CONFLICT (station_id, channel_id) DO UPDATE SET fader = COALESCE($3, mixer_channels.fader), is_on = COALESCE($4, mixer_channels.is_on), cue_enabled = COALESCE($5, mixer_channels.cue_enabled), muted = COALESCE($6, mixer_channels.muted), revision = mixer_channels.revision + 1, updated_at = NOW() RETURNING channel_id, fader, is_on, cue_enabled, muted, revision",
+        "INSERT INTO mixer_channel_state (station_id, channel_id, fader, is_on, cue_enabled, muted) VALUES ($1, $2, COALESCE($3, 1.0), COALESCE($4, TRUE), COALESCE($5, FALSE), COALESCE($6, FALSE)) ON CONFLICT (station_id, channel_id) DO UPDATE SET fader = COALESCE($3, mixer_channel_state.fader), is_on = COALESCE($4, mixer_channel_state.is_on), cue_enabled = COALESCE($5, mixer_channel_state.cue_enabled), muted = COALESCE($6, mixer_channel_state.muted), revision = mixer_channel_state.revision + 1, updated_at = NOW() RETURNING channel_id, fader, is_on, cue_enabled, muted, revision",
     )
     .bind(state.station_id)
     .bind(id)
@@ -1355,6 +1475,11 @@ pub async fn update_mixer_channel(
         row.get("muted"),
         row.get("revision"),
     );
+    if is_input {
+        if let Err(error) = crate::engine_sync::apply_source_mix(&state, id).await {
+            tracing::warn!(%id, %error, "audio engine did not apply the input fader");
+        }
+    }
     let _ = state.mixer_updates.send(channel.clone());
     Ok(Json(channel))
 }
@@ -1487,7 +1612,7 @@ async fn handle_mixer_websocket(
 
 async fn load_mixer_channels(state: &AppState) -> Result<Vec<Value>, ApiError> {
     let rows = sqlx::query(
-        "SELECT s.id, s.display_name, s.role, COALESCE(mc.fader, 1.0) AS fader, COALESCE(mc.is_on, TRUE) AS is_on, COALESCE(mc.cue_enabled, FALSE) AS cue_enabled, COALESCE(mc.muted, FALSE) AS muted, COALESCE(mc.revision, 0) AS revision FROM sessions s LEFT JOIN mixer_channels mc ON mc.station_id = s.station_id AND mc.channel_id = s.id WHERE s.station_id = $1 AND s.status IN ('approved', 'connected', 'disconnected') AND s.expires_at > NOW() ORDER BY s.created_at",
+        "SELECT id, display_name, role, fader, is_on, cue_enabled, muted, revision FROM (SELECT i.id, i.name AS display_name, i.source_type AS role, COALESCE(mc.fader, 1.0) AS fader, COALESCE(mc.is_on, TRUE) AS is_on, COALESCE(mc.cue_enabled, FALSE) AS cue_enabled, COALESCE(mc.muted, FALSE) AS muted, COALESCE(mc.revision, 0) AS revision, CASE i.source_type WHEN 'automation' THEN 0 ELSE 1 END AS grp, i.created_at FROM inputs i LEFT JOIN mixer_channel_state mc ON mc.station_id = i.station_id AND mc.channel_id = i.id WHERE i.station_id = $1 AND i.enabled UNION ALL SELECT s.id, s.display_name, s.role, COALESCE(mc.fader, 1.0), COALESCE(mc.is_on, TRUE), COALESCE(mc.cue_enabled, FALSE), COALESCE(mc.muted, FALSE), COALESCE(mc.revision, 0), 2, s.created_at FROM sessions s LEFT JOIN mixer_channel_state mc ON mc.station_id = s.station_id AND mc.channel_id = s.id WHERE s.station_id = $1 AND s.status IN ('approved', 'connected', 'disconnected') AND s.expires_at > NOW()) channels ORDER BY grp, created_at",
     )
     .bind(state.station_id)
     .fetch_all(&state.pool)
@@ -1749,4 +1874,92 @@ mod tests {
         assert_ne!(hash, token.as_bytes());
         assert_eq!(hash, hash_token(&token));
     }
+}
+
+#[derive(Deserialize)]
+pub struct MonitorSettingsRequest {
+    local_source: Option<String>,
+    local_input_id: Option<Uuid>,
+    local_volume: Option<f64>,
+    local_muted: Option<bool>,
+    guest_source: Option<String>,
+    guest_input_id: Option<Uuid>,
+}
+
+fn valid_monitor_source(source: &str) -> bool {
+    matches!(source, "cue" | "program_mix" | "mix_minus" | "input")
+}
+
+async fn load_monitor_settings(state: &AppState) -> Result<Value, ApiError> {
+    sqlx::query(
+        "INSERT INTO station_monitor_settings (station_id) VALUES ($1) ON CONFLICT (station_id) DO NOTHING",
+    )
+    .bind(state.station_id)
+    .execute(&state.pool)
+    .await?;
+    let row = sqlx::query(
+        "SELECT local_source, local_input_id, local_volume, local_muted, guest_source, guest_input_id FROM station_monitor_settings WHERE station_id = $1",
+    )
+    .bind(state.station_id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(json!({
+        "local_source": row.get::<String, _>("local_source"),
+        "local_input_id": row.get::<Option<Uuid>, _>("local_input_id"),
+        "local_volume": row.get::<f64, _>("local_volume"),
+        "local_muted": row.get::<bool, _>("local_muted"),
+        "guest_source": row.get::<String, _>("guest_source"),
+        "guest_input_id": row.get::<Option<Uuid>, _>("guest_input_id")
+    }))
+}
+
+pub async fn get_monitor_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_station(&headers, &state)?;
+    Ok(Json(load_monitor_settings(&state).await?))
+}
+
+pub async fn update_monitor_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MonitorSettingsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_station(&headers, &state)?;
+    for source in [
+        request.local_source.as_deref(),
+        request.guest_source.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !valid_monitor_source(source) {
+            return Err(ApiError::InvalidRequest(
+                "monitor source must be cue, program_mix, mix_minus, or input".to_owned(),
+            ));
+        }
+    }
+    if request
+        .local_volume
+        .is_some_and(|volume| !volume.is_finite() || !(0.0..=1.0).contains(&volume))
+    {
+        return Err(ApiError::InvalidRequest(
+            "local_volume must be between 0 and 1".to_owned(),
+        ));
+    }
+    load_monitor_settings(&state).await?;
+    sqlx::query(
+        "UPDATE station_monitor_settings SET local_source = COALESCE($1, local_source), local_input_id = CASE WHEN COALESCE($1, local_source) = 'input' THEN COALESCE($2, local_input_id) ELSE NULL END, local_volume = COALESCE($3, local_volume), local_muted = COALESCE($4, local_muted), guest_source = COALESCE($5, guest_source), guest_input_id = CASE WHEN COALESCE($5, guest_source) = 'input' THEN COALESCE($6, guest_input_id) ELSE NULL END, updated_at = NOW() WHERE station_id = $7",
+    )
+    .bind(request.local_source)
+    .bind(request.local_input_id)
+    .bind(request.local_volume)
+    .bind(request.local_muted)
+    .bind(request.guest_source)
+    .bind(request.guest_input_id)
+    .bind(state.station_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(load_monitor_settings(&state).await?))
 }
