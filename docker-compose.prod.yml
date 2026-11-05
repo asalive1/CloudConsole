@@ -1,0 +1,82 @@
+# Production overlay. Combine with docker-compose.yml, one Compose project per station:
+#   docker compose -p cc-<station> --env-file stations/<station>.env \
+#     -f docker-compose.yml -f docker-compose.prod.yml up -d
+# deploy/aws/station.sh wraps this. Required secrets fail fast when unset.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  audio-engine:
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "${ENGINE_CPUS:-1.5}"
+          memory: ${ENGINE_MEMORY:-1536M}
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8001' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  janus:
+    logging: *logging
+    environment:
+      DOCKER_IP: ${JANUS_PUBLIC_ADDRESS:?set JANUS_PUBLIC_ADDRESS}
+    deploy:
+      resources:
+        limits:
+          cpus: "${JANUS_CPUS:-1.0}"
+          memory: ${JANUS_MEMORY:-1024M}
+
+  mediamtx:
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "${MEDIAMTX_CPUS:-0.5}"
+          memory: ${MEDIAMTX_MEMORY:-512M}
+
+  backend:
+    logging: *logging
+    environment:
+      DATABASE_URL: postgres://cloud_console:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/cloud_console
+      STATION_API_KEY: ${STATION_API_KEY:?set STATION_API_KEY}
+      GUEST_JWT_SECRET: ${GUEST_JWT_SECRET:?set GUEST_JWT_SECRET}
+      STATION_ID: ${STATION_ID:?set STATION_ID}
+      JANUS_ROOM_PIN: ${JANUS_ROOM_PIN:?set JANUS_ROOM_PIN}
+    deploy:
+      resources:
+        limits:
+          cpus: "${BACKEND_CPUS:-0.5}"
+          memory: ${BACKEND_MEMORY:-512M}
+
+  frontend:
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  postgres:
+    logging: *logging
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          cpus: "${POSTGRES_CPUS:-0.5}"
+          memory: ${POSTGRES_MEMORY:-512M}
+
+  nginx:
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M

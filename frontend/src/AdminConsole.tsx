@@ -73,7 +73,7 @@ function fieldsFor(direction: "input" | "output", type: string): FieldSpec[] {
       { key: "interface", label: "Network interface", kind: "text", source: "nic", help: "Interface used for the SRT connection." },
       { key: "latency_ms", label: "Latency (ms)", kind: "number", placeholder: "120" },
       { key: "stream_id", label: "Stream ID", kind: "text" },
-      { key: "passphrase", label: "Passphrase", kind: "password", help: "10–79 characters; leave empty for no encryption." },
+      { key: "passphrase", label: "Passphrase", kind: "password", help: "10â€“79 characters; leave empty for no encryption." },
     ];
     if (direction === "output") {
       common.push({ key: "pbkeylen", label: "Key length", kind: "select", options: ["", "16", "24", "32"] });
@@ -189,7 +189,7 @@ export default function AdminConsole() {
     <main className="console admin">
       <header className="bar">
         <strong className="brand">Station administration</strong>
-        <a href="/">← Console</a>
+        <a href="/">â† Console</a>
       </header>
       <nav className="tabs" role="tablist">
         {TABS.map((item) => (
@@ -317,7 +317,7 @@ function Endpoints({
   }
 
   async function remove(resource: Resource) {
-    if (!window.confirm(`Delete “${resource.name}”?`)) return;
+    if (!window.confirm(`Delete â€œ${resource.name}â€?`)) return;
     try {
       await apiRequest(`/station/config/${kind}/${resource.id}`, { method: "DELETE", headers: api.headers() });
       await api.load();
@@ -375,7 +375,7 @@ function Endpoints({
                   <select value={String(values[spec.key] ?? "")} onChange={(event) => setValues({ ...values, [spec.key]: event.target.value })}>
                     <option value="">Default (system routing)</option>
                     {(system?.network_interfaces ?? []).map((nic) => (
-                      <option key={nic.name} value={nic.name}>{nic.name}{nic.addresses.length > 0 ? ` — ${nic.addresses.join(", ")}` : ""} ({nic.state})</option>
+                      <option key={nic.name} value={nic.name}>{nic.name}{nic.addresses.length > 0 ? ` â€” ${nic.addresses.join(", ")}` : ""} ({nic.state})</option>
                     ))}
                     {Boolean(values[spec.key]) && !(system?.network_interfaces ?? []).some((nic) => nic.name === values[spec.key]) && (
                       <option value={String(values[spec.key])}>{String(values[spec.key])}</option>
@@ -428,7 +428,7 @@ function summary(config: Cfg): string {
   for (const key of ["device", "mode", "host", "address", "port", "interface"]) {
     if (config[key] !== undefined && config[key] !== "") parts.push(`${key === "interface" ? "nic" : key}: ${String(config[key])}`);
   }
-  return parts.join(" · ");
+  return parts.join(" Â· ");
 }
 
 function NicSelect({ value, onChange, interfaces }: { value: string; onChange: (value: string) => void; interfaces: SystemDevices["network_interfaces"] }) {
@@ -436,32 +436,38 @@ function NicSelect({ value, onChange, interfaces }: { value: string; onChange: (
     <select value={value} onChange={(event) => onChange(event.target.value)}>
       <option value="">Default (system routing)</option>
       {interfaces.map((nic) => (
-        <option key={nic.name} value={nic.name}>{nic.name}{nic.addresses.length > 0 ? ` — ${nic.addresses.join(", ")}` : ""} ({nic.state})</option>
+        <option key={nic.name} value={nic.name}>{nic.name}{nic.addresses.length > 0 ? ` â€” ${nic.addresses.join(", ")}` : ""} ({nic.state})</option>
       ))}
       {value && !interfaces.some((nic) => nic.name === value) && <option value={value}>{value}</option>}
     </select>
   );
 }
 
+type MetadataStatus = { id: string; connections: number; bytes: number; error: string | null };
+
 function Metadata({ config, api, apiKey }: { config: StationConfig; api: Api; apiKey: string }) {
   const interfaces = usePolling<SystemDevices>("/audio/system/devices", apiKey, 15000).data?.network_interfaces ?? [];
+  const status = usePolling<MetadataStatus[]>("/audio/metadata", apiKey, 3000).data ?? [];
   return (
     <>
-      <MetadataCard direction="input" config={config} api={api} interfaces={interfaces} />
-      <MetadataCard direction="output" config={config} api={api} interfaces={interfaces} />
+      <MetadataCard direction="input" config={config} api={api} interfaces={interfaces} status={status} />
+      <MetadataCard direction="output" config={config} api={api} interfaces={interfaces} status={status} />
     </>
   );
 }
 
-function MetadataCard({ direction, config, api, interfaces }: { direction: "input" | "output"; config: StationConfig; api: Api; interfaces: SystemDevices["network_interfaces"] }) {
+function MetadataCard({ direction, config, api, interfaces, status }: { direction: "input" | "output"; config: StationConfig; api: Api; interfaces: SystemDevices["network_interfaces"]; status: MetadataStatus[] }) {
   const existing = config.metadata.find((item) => item.direction === direction) ?? null;
   const [mode, setMode] = useState("server");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
   const [nic, setNic] = useState("");
   const [enabled, setEnabled] = useState(true);
+  const [delayed, setDelayed] = useState(true);
+  const live = existing ? status.find((item) => item.id === existing.id) : undefined;
 
   useEffect(() => {
+    setDelayed(existing?.config.delayed !== false);
     setMode(String(existing?.config.mode ?? "server"));
     setHost(String(existing?.config.host ?? ""));
     setPort(String(existing?.config.port ?? ""));
@@ -471,8 +477,8 @@ function MetadataCard({ direction, config, api, interfaces }: { direction: "inpu
 
   // Input: server accepts incoming data, client pulls. Output: client pushes, server waits for a puller.
   const needsHost = mode === "client";
-  const serverLabel = direction === "input" ? "Server — accept incoming data" : "Server — a client connects to pull data";
-  const clientLabel = direction === "input" ? "Client — pull data from a source" : "Client — push data to a destination";
+  const serverLabel = direction === "input" ? "Server â€” accept incoming data" : "Server â€” a client connects to pull data";
+  const clientLabel = direction === "input" ? "Client â€” pull data from a source" : "Client â€” push data to a destination";
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -481,7 +487,7 @@ function MetadataCard({ direction, config, api, interfaces }: { direction: "inpu
       direction,
       format: "passthrough",
       enabled,
-      config: { mode, port: Number(port), ...(needsHost ? { host } : {}), ...(nic ? { interface: nic } : {}) },
+      config: { mode, port: Number(port), ...(needsHost ? { host } : {}), ...(nic ? { interface: nic } : {}), ...(direction === "output" ? { delayed } : {}) },
     };
     api.setBusy(true);
     api.setError("");
@@ -538,11 +544,20 @@ function MetadataCard({ direction, config, api, interfaces }: { direction: "inpu
           <NicSelect value={nic} onChange={setNic} interfaces={interfaces} />
         </label>
         <label className="check"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> Enabled</label>
+        {direction === "output" && (
+          <label className="check"><input type="checkbox" checked={delayed} onChange={(event) => setDelayed(event.target.checked)} /> Delay with the program audio</label>
+        )}
         <div className="row-actions">
           <button type="submit" className="btn btn-build" disabled={api.busy}>Save</button>
           {existing && <button type="button" className="btn" onClick={() => void remove()}>Remove</button>}
         </div>
       </form>
+      {existing && enabled && (
+        <p className="muted small">
+          {live ? `${live.connections > 0 ? "Connected" : "Waiting for a connection"} · ${live.bytes.toLocaleString()} bytes` : "Starting…"}
+          {live?.error ? ` · ${live.error}` : ""}
+        </p>
+      )}
     </section>
   );
 }
@@ -574,13 +589,13 @@ function DelaySettings({ apiKey, onError }: { apiKey: string; onError: (message:
       <h2>Profanity delay</h2>
       <form onSubmit={save} className="form">
         <label>
-          <span className="label">Delay time (seconds, 5–60)</span>
+          <span className="label">Delay time (seconds, 5â€“60)</span>
           <input type="number" min={5} max={60} required value={seconds} onChange={(event) => setSeconds(event.target.value)} />
         </label>
         <button type="submit" className="btn btn-build">Save delay time</button>
       </form>
       <p className="muted small">
-        Current buffer {status.data ? `${status.data.buffered_delay_seconds.toFixed(1)}s (${status.data.state})` : "…"}. Use Build
+        Current buffer {status.data ? `${status.data.buffered_delay_seconds.toFixed(1)}s (${status.data.state})` : "â€¦"}. Use Build
         delay on the console to start building the buffer.
       </p>
     </section>
@@ -659,7 +674,7 @@ function GuestLinks({ apiKey, onError }: { apiKey: string; onError: (message: st
       {created && <input readOnly className="mono" value={created} onFocus={(event) => event.currentTarget.select()} />}
       {(links.data ?? []).map((link) => (
         <div key={link.id} className="row item">
-          <span className="small">{link.name ?? "Guest link"} · {link.status} · expires {new Date(link.expires_at).toLocaleString()}</span>
+          <span className="small">{link.name ?? "Guest link"} Â· {link.status} Â· expires {new Date(link.expires_at).toLocaleString()}</span>
           {link.status === "active" && <button type="button" className="btn btn-small" onClick={() => void invalidate(link.id)}>Invalidate</button>}
         </div>
       ))}

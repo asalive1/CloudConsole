@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod metadata;
 mod pipeline;
 mod system;
 
@@ -24,6 +25,7 @@ use pipeline::{
 #[derive(Clone)]
 struct AppState {
     engine: std::sync::Arc<Mutex<AudioEngine>>,
+    metadata: std::sync::Arc<Mutex<metadata::MetadataRelay>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -129,8 +131,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = AudioEngine::new()
         .map_err(|error| format!("audio engine initialization failed: {error}"))?;
+    let engine = std::sync::Arc::new(Mutex::new(engine));
+    let clock = std::sync::Arc::new(metadata::DelayClock::default());
+    tokio::spawn(follow_delay(engine.clone(), clock.clone()));
     let state = AppState {
-        engine: std::sync::Arc::new(Mutex::new(engine)),
+        engine,
+        metadata: std::sync::Arc::new(Mutex::new(metadata::MetadataRelay::new(clock))),
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -147,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .put(start_cue_bridge)
                 .delete(stop_cue_bridge),
         )
+        .route("/metadata", get(metadata_status).put(configure_metadata))
         .route("/delay", get(delay_status))
         .route("/delay/config", patch(configure_delay))
         .route("/delay/dump", post(dump_delay))
@@ -169,6 +176,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn follow_delay(
+    engine: std::sync::Arc<Mutex<AudioEngine>>,
+    clock: std::sync::Arc<metadata::DelayClock>,
+) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    loop {
+        tick.tick().await;
+        if let Ok(status) = engine.lock().await.delay_status() {
+            clock.update(status.buffered_delay_seconds);
+        }
+    }
+}
+
+async fn metadata_status(State(state): State<AppState>) -> Json<Vec<metadata::EndpointStatus>> {
+    Json(state.metadata.lock().await.status())
+}
+
+async fn configure_metadata(
+    State(state): State<AppState>,
+    Json(config): Json<metadata::MetadataConfig>,
+) -> Result<Json<Vec<metadata::EndpointStatus>>, ApiError> {
+    let mut relay = state.metadata.lock().await;
+    relay
+        .apply(config.endpoints)
+        .map_err(ApiError::InvalidRequest)?;
+    Ok(Json(relay.status()))
 }
 
 async fn health() -> Json<HealthResponse> {

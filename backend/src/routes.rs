@@ -794,6 +794,12 @@ pub async fn update_station_resource(
 }
 
 async fn sync_engine_resource(state: &AppState, kind: &str, id: Uuid, removed: bool) {
+    if kind == "metadata" {
+        if let Err(error) = crate::engine_sync::apply_metadata(state).await {
+            tracing::warn!(%error, "audio engine did not accept the metadata configuration yet");
+        }
+        return;
+    }
     let result = match (kind, removed) {
         ("inputs", false) => crate::engine_sync::apply_input(state, id).await,
         ("inputs", true) => crate::engine_sync::remove_input(state, id).await,

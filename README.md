@@ -2,6 +2,17 @@
 
 Cloud Console is a browser-based broadcast console for station operators, hosts, co-hosts, and invited guests.
 
+## Metadata relay
+
+The audio engine relays metadata (XML, ASCII, RDS, HD Radio, custom) as raw TCP bytes.
+Each direction supports a server or client role and a chosen network interface; outputs
+can be held back by the live Program delay. Configure it in Station Administration.
+Published TCP ports: `METADATA_TCP_PORTS` (default 6000-6019).
+
+## Production deployment
+
+See [docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md) and `docker-compose.prod.yml`.
+
 ## Local development
 
 Requirements: Docker Desktop with Compose enabled.

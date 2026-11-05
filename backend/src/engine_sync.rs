@@ -49,6 +49,56 @@ pub async fn remove_output(state: &AppState, id: Uuid) -> Result<(), String> {
     remove_engine_resource(state, "outputs", id).await
 }
 
+pub async fn apply_metadata(state: &AppState) -> Result<(), String> {
+    let _guard = SYNC_LOCK.lock().await;
+    push_metadata(state).await
+}
+
+// Metadata is sent as one complete desired state; the engine ignores unchanged endpoints.
+async fn push_metadata(state: &AppState) -> Result<(), String> {
+    let rows = sqlx::query(
+        "SELECT id, direction, config FROM metadata_configs WHERE station_id = $1 AND enabled ORDER BY created_at",
+    )
+    .bind(state.station_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|error| error.to_string())?;
+    let endpoints: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let config: Value = row.get("config");
+            let direction: String = row.get("direction");
+            json!({
+                "id": row.get::<Uuid, _>("id"),
+                "direction": direction,
+                "mode": config["mode"],
+                "host": config.get("host").filter(|host| host.is_string()),
+                "port": config["port"],
+                "interface": config.get("interface").filter(|name| name.is_string()),
+                "delayed": config.get("delayed").and_then(Value::as_bool).unwrap_or(true),
+            })
+        })
+        .collect();
+    let response = state
+        .http_client
+        .put(engine_url(state, "metadata"))
+        .json(&json!({ "endpoints": endpoints }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    let status = response.status();
+    let detail = response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| status.to_string());
+    Err(detail)
+}
+
 pub async fn apply_source_mix(state: &AppState, id: Uuid) -> Result<(), String> {
     let row = sqlx::query(
         "SELECT fader, is_on, muted, cue_enabled FROM mixer_channel_state WHERE station_id = $1 AND channel_id = $2",
@@ -106,6 +156,9 @@ async fn reconcile(state: &AppState) -> Result<(), String> {
         if let Err(error) = add_output(state, *id).await {
             tracing::warn!(%id, %error, "could not start configured audio output");
         }
+    }
+    if let Err(error) = push_metadata(state).await {
+        tracing::warn!(%error, "could not apply metadata configuration");
     }
     Ok(())
 }
