@@ -141,6 +141,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
     let reconnectTimer: number | null = null;
     let attempts = 0;
     let wasConnected = false;
+    const published = new Set<Bus>();
     const authorization = { Authorization: `Bearer ${session.access_token}` };
 
     const report = async (state: "connected" | "disconnected") => {
@@ -271,7 +272,11 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
         onmessage: (message: JanusMessage, jsep?: JanusJS.JSEP) => {
           const event = pluginData(message);
           if (jsep) handles.current.get(bus)?.handleRemoteJsep({ jsep });
-          if (event.audiobridge === "joined") publish(bus);
+          // Janus also sends "joined" (without an id) to existing participants when others join.
+          if (event.audiobridge === "joined" && typeof event.id === "number" && !published.has(bus)) {
+            published.add(bus);
+            publish(bus);
+          }
           if (bus === "program") trackRoomLevels(event);
           if (typeof event.error === "string") setError(`${bus} audio error: ${event.error}`);
         },
@@ -347,6 +352,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
       if (stopped) return;
       wasConnected = false;
       roomNames.current.clear();
+      published.clear();
       janus?.destroy({});
       janus = null;
       cleanup();

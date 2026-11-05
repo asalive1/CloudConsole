@@ -122,6 +122,20 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
     }
   }, [ownStatus]);
 
+  // Keep the shared session name in step with this browser's configured name.
+  useEffect(() => {
+    if (!participant) return;
+    const name = prefs.name.trim() || "Operator";
+    const timer = window.setTimeout(() => {
+      void apiRequest(`/live-sessions/${participant.session_id}`, {
+        method: "PATCH",
+        headers: json,
+        body: JSON.stringify({ display_name: name }),
+      }).catch(() => undefined);
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [participant?.session_id, prefs.name]);
+
   const localMonitorBus = localChoice === "cue" ? "cue" : "program";
   const live = useLiveAudio({
     participant,
@@ -138,7 +152,10 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   const ownId = participant?.session_id;
   const sources = channels.filter((channel) => channel.role === "automation" || channel.role === "aux");
   const connectedIds = new Set((sessions.data ?? []).filter((item) => item.status === "connected").map((item) => item.id));
-  const mics = channels.filter((channel) => channel.role !== "automation" && channel.role !== "aux" && channel.channel_id !== ownId && connectedIds.has(channel.channel_id));
+  const sessionNames = new Map((sessions.data ?? []).map((item) => [item.id, item.display_name]));
+  const mics = channels
+    .filter((channel) => channel.role !== "automation" && channel.role !== "aux" && channel.channel_id !== ownId && connectedIds.has(channel.channel_id))
+    .map((channel) => ({ ...channel, display_name: sessionNames.get(channel.channel_id) ?? channel.display_name }));
   const ownChannel = channels.find((channel) => channel.channel_id === ownId);
   const metricFor = (id: string) => metrics.data?.sources.find((source) => source.id === id);
 

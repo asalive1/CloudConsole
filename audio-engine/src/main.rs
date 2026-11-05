@@ -17,7 +17,9 @@ use uuid::Uuid;
 mod pipeline;
 mod system;
 
-use pipeline::{AudioEngine, AudioMetrics, BridgeConfig, BridgeStatus, DelayStatus, EngineError};
+use pipeline::{
+    AudioEngine, AudioMetrics, BridgeBus, BridgeConfig, BridgeStatus, DelayStatus, EngineError,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -112,6 +114,8 @@ struct ConfigureDelayRequest {
 struct SourceMixRequest {
     volume: f64,
     muted: bool,
+    #[serde(default)]
+    cue: bool,
 }
 
 #[tokio::main]
@@ -136,6 +140,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/bridge",
             get(bridge_status).put(start_bridge).delete(stop_bridge),
+        )
+        .route(
+            "/bridge/cue",
+            get(cue_bridge_status)
+                .put(start_cue_bridge)
+                .delete(stop_cue_bridge),
         )
         .route("/delay", get(delay_status))
         .route("/delay/config", patch(configure_delay))
@@ -176,7 +186,24 @@ async fn system_devices() -> Result<Json<system::SystemDevices>, ApiError> {
 }
 
 async fn bridge_status(State(state): State<AppState>) -> Json<BridgeStatus> {
-    Json(state.engine.lock().await.bridge_status())
+    Json(state.engine.lock().await.bridge_status(BridgeBus::Program))
+}
+
+async fn cue_bridge_status(State(state): State<AppState>) -> Json<BridgeStatus> {
+    Json(state.engine.lock().await.bridge_status(BridgeBus::Cue))
+}
+
+async fn start_cue_bridge(
+    State(state): State<AppState>,
+    Json(mut config): Json<BridgeConfig>,
+) -> Result<Json<BridgeStatus>, ApiError> {
+    config.bus = BridgeBus::Cue;
+    Ok(Json(state.engine.lock().await.start_bridge(config)?))
+}
+
+async fn stop_cue_bridge(State(state): State<AppState>) -> StatusCode {
+    state.engine.lock().await.stop_cue_bridge();
+    StatusCode::NO_CONTENT
 }
 
 async fn start_bridge(
@@ -239,7 +266,7 @@ async fn set_source_mix(
         .engine
         .lock()
         .await
-        .set_source_mix(id, request.volume, request.muted)?;
+        .set_source_mix(id, request.volume, request.muted, request.cue)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -256,10 +256,21 @@ struct SourceRoute {
     bridge_pad: Option<gst::Pad>,
     mixer_queue_src: Option<gst::Pad>,
     bridge_queue_src: Option<gst::Pad>,
+    cue_pad: Option<gst::Pad>,
+    cue_queue_src: Option<gst::Pad>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BridgeBus {
+    #[default]
+    Program,
+    Cue,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct BridgeConfig {
+    #[serde(skip)]
+    pub bus: BridgeBus,
     pub listen_port: u16,
     pub remote_host: String,
     pub remote_port: u16,
@@ -283,7 +294,7 @@ pub struct BridgeStatus {
 struct ActiveBridge {
     config: BridgeConfig,
     rx_bin: gst::Bin,
-    rx_mixer_pad: gst::Pad,
+    rx_mixer_pad: Option<gst::Pad>,
     tx_bin: gst::Bin,
     tx_tee_pad: gst::Pad,
     received: Arc<AtomicU64>,
@@ -308,6 +319,9 @@ pub struct AudioEngine {
     bridge_mixer: gst::Element,
     bridge_tee: gst::Element,
     bridge: Option<ActiveBridge>,
+    cue_mixer: gst::Element,
+    cue_tee: gst::Element,
+    cue_bridge: Option<ActiveBridge>,
     sources: HashMap<Uuid, ActiveSource>,
     outputs: HashMap<Uuid, ActiveOutput>,
     metrics: Arc<Mutex<LiveMetrics>>,
@@ -498,6 +512,7 @@ impl AudioEngine {
         ])?;
         bridge_null_queue.link(&bridge_null_sink)?;
         link_request_pad(&bridge_tee, "src_%u", &bridge_null_queue, "sink")?;
+        let (cue_mixer, cue_tee) = build_bus_mixer(&pipeline, "cue")?;
         let delay_src = delay_queue
             .static_pad("src")
             .ok_or_else(|| EngineError::Pipeline("delay queue has no source pad".to_owned()))?;
@@ -554,6 +569,9 @@ impl AudioEngine {
             bridge_mixer,
             bridge_tee,
             bridge: None,
+            cue_mixer,
+            cue_tee,
+            cue_bridge: None,
             sources: HashMap::new(),
             outputs: HashMap::new(),
             metrics,
@@ -681,9 +699,20 @@ impl AudioEngine {
             .property("max-size-bytes", 0u32)
             .property("max-size-time", 300_000_000u64)
             .build()?;
-        route.elements = vec![tee.clone(), mixer_queue.clone(), bridge_queue.clone()];
+        let cue_queue = gst::ElementFactory::make("queue")
+            .property_from_str("leaky", "downstream")
+            .property("max-size-buffers", 0u32)
+            .property("max-size-bytes", 0u32)
+            .property("max-size-time", 300_000_000u64)
+            .build()?;
+        route.elements = vec![
+            tee.clone(),
+            mixer_queue.clone(),
+            bridge_queue.clone(),
+            cue_queue.clone(),
+        ];
         self.pipeline
-            .add_many([&tee, &mixer_queue, &bridge_queue])?;
+            .add_many([&tee, &mixer_queue, &bridge_queue, &cue_queue])?;
         source_pad
             .link(
                 &tee.static_pad("sink")
@@ -692,6 +721,20 @@ impl AudioEngine {
             .map_err(|error| EngineError::Pipeline(error.to_string()))?;
         link_request_pad(&tee, "src_%u", &mixer_queue, "sink")?;
         link_request_pad(&tee, "src_%u", &bridge_queue, "sink")?;
+        link_request_pad(&tee, "src_%u", &cue_queue, "sink")?;
+        let cue_pad = self
+            .cue_mixer
+            .request_pad_simple("sink_%u")
+            .ok_or_else(|| fail("cue mixer rejected an input pad"))?;
+        cue_pad.set_property("mute", true);
+        route.cue_pad = Some(cue_pad.clone());
+        let cue_queue_src = cue_queue
+            .static_pad("src")
+            .ok_or_else(|| fail("queue has no source pad"))?;
+        cue_queue_src
+            .link(&cue_pad)
+            .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+        route.cue_queue_src = Some(cue_queue_src);
         let mixer_pad = self
             .mixer
             .request_pad_simple("sink_%u")
@@ -737,8 +780,14 @@ impl AudioEngine {
         if let (Some(src), Some(pad)) = (&route.bridge_queue_src, &route.bridge_pad) {
             let _ = src.unlink(pad);
         }
+        if let (Some(src), Some(pad)) = (&route.cue_queue_src, &route.cue_pad) {
+            let _ = src.unlink(pad);
+        }
         if let Some(pad) = &route.mixer_pad {
             self.mixer.release_request_pad(pad);
+        }
+        if let Some(pad) = &route.cue_pad {
+            self.cue_mixer.release_request_pad(pad);
         }
         if let Some(pad) = &route.bridge_pad {
             self.bridge_mixer.release_request_pad(pad);
@@ -764,13 +813,19 @@ impl AudioEngine {
                 "payload_type must be between 96 and 127".to_owned(),
             ));
         }
-        self.stop_bridge();
+        self.stop_bridge_bus(config.bus);
         let received = Arc::new(AtomicU64::new(0));
         let sent = Arc::new(AtomicU64::new(0));
 
+        // The cue bus is send-only, so its receiver only holds the socket open.
+        let rx_tail = if config.bus == BridgeBus::Program {
+            "rtpjitterbuffer latency=60 do-lost=true ! rtpopusdepay ! opusdec plc=true ! audioconvert ! audioresample ! audio/x-raw,format=F32LE,layout=interleaved,rate=48000,channels=2 ! queue"
+        } else {
+            "fakesink sync=false async=false"
+        };
         let rx_bin = gst::parse::bin_from_description(
             &format!(
-                "udpsrc name=bridge_udpsrc port={} caps=\"application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string)OPUS,payload=(int){}\" ! rtpjitterbuffer latency=60 do-lost=true ! rtpopusdepay ! opusdec plc=true ! audioconvert ! audioresample ! audio/x-raw,format=F32LE,layout=interleaved,rate=48000,channels=2 ! queue",
+                "udpsrc name=bridge_udpsrc port={} caps=\"application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string)OPUS,payload=(int){}\" ! {rx_tail}",
                 config.listen_port, config.payload_type
             ),
             true,
@@ -788,25 +843,45 @@ impl AudioEngine {
         count_buffers(&rx_bin, "bridge_udpsrc", "src", &received);
         count_buffers(&tx_bin, "bridge_udpsink", "sink", &sent);
 
+        // Janus only accepts plain-RTP audio from the address it sends to, so the
+        // sender reuses the receiver's socket and transmits from the listen port.
+        rx_bin.set_state(gst::State::Ready).map_err(|_| {
+            EngineError::Pipeline("bridge receiver could not open its socket".to_owned())
+        })?;
+        if let (Some(src), Some(sink)) = (
+            rx_bin.by_name("bridge_udpsrc"),
+            tx_bin.by_name("bridge_udpsink"),
+        ) {
+            let socket = src.property_value("used-socket");
+            sink.set_property_from_value("socket", &socket);
+            sink.set_property("close-socket", false);
+        }
+
         self.pipeline.add_many([&rx_bin, &tx_bin])?;
-        let rx_pad = rx_bin
-            .static_pad("src")
-            .ok_or_else(|| EngineError::Pipeline("bridge receiver has no pad".to_owned()))?;
-        let rx_mixer_pad = self
-            .mixer
-            .request_pad_simple("sink_%u")
-            .ok_or_else(|| EngineError::Pipeline("mixer rejected the bridge pad".to_owned()))?;
+        let rx_mixer_pad =
+            if config.bus == BridgeBus::Program {
+                Some(self.mixer.request_pad_simple("sink_%u").ok_or_else(|| {
+                    EngineError::Pipeline("mixer rejected the bridge pad".to_owned())
+                })?)
+            } else {
+                None
+            };
         let tx_pad = tx_bin
             .static_pad("sink")
             .ok_or_else(|| EngineError::Pipeline("bridge sender has no pad".to_owned()))?;
-        let tx_tee_pad = self
-            .bridge_tee
+        let tee = match config.bus {
+            BridgeBus::Program => &self.bridge_tee,
+            BridgeBus::Cue => &self.cue_tee,
+        };
+        let tx_tee_pad = tee
             .request_pad_simple("src_%u")
             .ok_or_else(|| EngineError::Pipeline("bridge router rejected a pad".to_owned()))?;
-        let linked = rx_pad
-            .link(&rx_mixer_pad)
-            .map(|_| ())
-            .and_then(|_| tx_tee_pad.link(&tx_pad).map(|_| ()));
+        let rx_link = match (&rx_mixer_pad, rx_bin.static_pad("src")) {
+            (Some(mixer_pad), Some(rx_pad)) => rx_pad.link(mixer_pad).map(|_| ()),
+            _ => Ok(()),
+        };
+        let linked = rx_link.and_then(|_| tx_tee_pad.link(&tx_pad).map(|_| ()));
+        let bus = config.bus;
         let bridge = ActiveBridge {
             config,
             rx_bin,
@@ -828,12 +903,27 @@ impl AudioEngine {
             self.release_bridge(&bridge);
             return Err(EngineError::Pipeline(error.to_string()));
         }
-        self.bridge = Some(bridge);
-        Ok(self.bridge_status())
+        match bus {
+            BridgeBus::Program => self.bridge = Some(bridge),
+            BridgeBus::Cue => self.cue_bridge = Some(bridge),
+        }
+        Ok(self.bridge_status(bus))
     }
 
     pub fn stop_bridge(&mut self) {
-        if let Some(bridge) = self.bridge.take() {
+        self.stop_bridge_bus(BridgeBus::Program);
+    }
+
+    pub fn stop_cue_bridge(&mut self) {
+        self.stop_bridge_bus(BridgeBus::Cue);
+    }
+
+    fn stop_bridge_bus(&mut self, bus: BridgeBus) {
+        let slot = match bus {
+            BridgeBus::Program => self.bridge.take(),
+            BridgeBus::Cue => self.cue_bridge.take(),
+        };
+        if let Some(bridge) = slot {
             self.release_bridge(&bridge);
         }
     }
@@ -841,20 +931,31 @@ impl AudioEngine {
     fn release_bridge(&self, bridge: &ActiveBridge) {
         let _ = bridge.rx_bin.set_state(gst::State::Null);
         let _ = bridge.tx_bin.set_state(gst::State::Null);
-        if let Some(pad) = bridge.rx_bin.static_pad("src") {
-            let _ = pad.unlink(&bridge.rx_mixer_pad);
+        if let (Some(rx_pad), Some(mixer_pad)) =
+            (bridge.rx_bin.static_pad("src"), &bridge.rx_mixer_pad)
+        {
+            let _ = rx_pad.unlink(mixer_pad);
         }
         if let Some(pad) = bridge.tx_bin.static_pad("sink") {
             let _ = bridge.tx_tee_pad.unlink(&pad);
         }
-        self.mixer.release_request_pad(&bridge.rx_mixer_pad);
-        self.bridge_tee.release_request_pad(&bridge.tx_tee_pad);
+        if let Some(mixer_pad) = &bridge.rx_mixer_pad {
+            self.mixer.release_request_pad(mixer_pad);
+        }
+        match bridge.config.bus {
+            BridgeBus::Program => self.bridge_tee.release_request_pad(&bridge.tx_tee_pad),
+            BridgeBus::Cue => self.cue_tee.release_request_pad(&bridge.tx_tee_pad),
+        }
         let _ = self.pipeline.remove(&bridge.rx_bin);
         let _ = self.pipeline.remove(&bridge.tx_bin);
     }
 
-    pub fn bridge_status(&self) -> BridgeStatus {
-        match &self.bridge {
+    pub fn bridge_status(&self, bus: BridgeBus) -> BridgeStatus {
+        let active = match bus {
+            BridgeBus::Program => &self.bridge,
+            BridgeBus::Cue => &self.cue_bridge,
+        };
+        match active {
             Some(bridge) => BridgeStatus {
                 active: true,
                 listen_port: Some(bridge.config.listen_port),
@@ -1080,6 +1181,7 @@ impl AudioEngine {
         id: Uuid,
         volume: f64,
         muted: bool,
+        cue: bool,
     ) -> Result<(), EngineError> {
         let source = self.sources.get(&id).ok_or(EngineError::NotFound)?;
         let volume = volume.clamp(0.0, 2.0);
@@ -1089,6 +1191,11 @@ impl AudioEngine {
         {
             pad.set_property("volume", volume);
             pad.set_property("mute", muted);
+        }
+        // Cue is pre-fader and independent of the program on/off state.
+        if let Some(pad) = &source.route.cue_pad {
+            pad.set_property("volume", 1.0f64);
+            pad.set_property("mute", !cue);
         }
         Ok(())
     }
@@ -1878,6 +1985,69 @@ fn is_multicast_host(host: &str) -> bool {
 }
 
 // Returns the address to bind and any extra udpsrc properties.
+fn build_bus_mixer(
+    pipeline: &gst::Pipeline,
+    prefix: &str,
+) -> Result<(gst::Element, gst::Element), EngineError> {
+    let make = |factory: &str, suffix: &str| {
+        gst::ElementFactory::make(factory)
+            .name(format!("{prefix}_{suffix}"))
+            .build()
+    };
+    let mixer = make("audiomixer", "mixer")?;
+    let silence = gst::ElementFactory::make("audiotestsrc")
+        .name(format!("{prefix}_silence"))
+        .property_from_str("wave", "silence")
+        .property("is-live", true)
+        .build()?;
+    let silence_caps = gst::ElementFactory::make("capsfilter")
+        .name(format!("{prefix}_silence_caps"))
+        .property("caps", standard_caps())
+        .build()?;
+    let convert = make("audioconvert", "convert")?;
+    let resample = make("audioresample", "resample")?;
+    let caps = gst::ElementFactory::make("capsfilter")
+        .name(format!("{prefix}_caps"))
+        .property("caps", standard_caps())
+        .build()?;
+    let tee = make("tee", "tee")?;
+    let null_queue = gst::ElementFactory::make("queue")
+        .name(format!("{prefix}_null_queue"))
+        .property("max-size-buffers", 5u32)
+        .property("max-size-bytes", 0u32)
+        .property("max-size-time", 0u64)
+        .build()?;
+    let null_sink = gst::ElementFactory::make("fakesink")
+        .name(format!("{prefix}_null_sink"))
+        .property("sync", true)
+        .property("async", false)
+        .build()?;
+    pipeline.add_many([
+        &mixer,
+        &silence,
+        &silence_caps,
+        &convert,
+        &resample,
+        &caps,
+        &tee,
+        &null_queue,
+        &null_sink,
+    ])?;
+    gst::Element::link_many([&silence, &silence_caps])?;
+    let silence_pad = mixer
+        .request_pad_simple("sink_%u")
+        .ok_or_else(|| EngineError::Pipeline(format!("{prefix} mixer rejected a pad")))?;
+    silence_caps
+        .static_pad("src")
+        .ok_or_else(|| EngineError::Pipeline(format!("{prefix} silence has no pad")))?
+        .link(&silence_pad)
+        .map_err(|error| EngineError::Pipeline(error.to_string()))?;
+    gst::Element::link_many([&mixer, &convert, &resample, &caps, &tee])?;
+    null_queue.link(&null_sink)?;
+    link_request_pad(&tee, "src_%u", &null_queue, "sink")?;
+    Ok((mixer, tee))
+}
+
 fn rtp_input_binding(
     address: &str,
     interface: Option<&str>,

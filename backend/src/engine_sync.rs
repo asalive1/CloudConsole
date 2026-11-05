@@ -51,24 +51,25 @@ pub async fn remove_output(state: &AppState, id: Uuid) -> Result<(), String> {
 
 pub async fn apply_source_mix(state: &AppState, id: Uuid) -> Result<(), String> {
     let row = sqlx::query(
-        "SELECT fader, is_on, muted FROM mixer_channel_state WHERE station_id = $1 AND channel_id = $2",
+        "SELECT fader, is_on, muted, cue_enabled FROM mixer_channel_state WHERE station_id = $1 AND channel_id = $2",
     )
     .bind(state.station_id)
     .bind(id)
     .fetch_optional(&state.pool)
     .await
     .map_err(|error| error.to_string())?;
-    let (volume, muted) = match row {
+    let (volume, muted, cue) = match row {
         Some(row) => (
             row.get::<f64, _>("fader"),
             !row.get::<bool, _>("is_on") || row.get::<bool, _>("muted"),
+            row.get::<bool, _>("cue_enabled"),
         ),
-        None => (1.0, false),
+        None => (1.0, false, false),
     };
     let response = state
         .http_client
         .patch(engine_url(state, &format!("sources/{id}/mix")))
-        .json(&json!({ "volume": volume, "muted": muted }))
+        .json(&json!({ "volume": volume, "muted": muted, "cue": cue }))
         .send()
         .await
         .map_err(|error| error.to_string())?;

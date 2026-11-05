@@ -1120,6 +1120,38 @@ pub struct CreateLiveSession {
     role: String,
 }
 
+#[derive(Deserialize)]
+pub struct RenameLiveSession {
+    display_name: String,
+}
+
+pub async fn rename_live_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RenameLiveSession>,
+) -> Result<StatusCode, ApiError> {
+    authorize_station(&headers, &state)?;
+    let display_name = request.display_name.trim();
+    if display_name.is_empty() || display_name.len() > 100 {
+        return Err(ApiError::InvalidRequest(
+            "display_name must contain between 1 and 100 characters".to_owned(),
+        ));
+    }
+    let updated = sqlx::query(
+        "UPDATE sessions SET display_name = $1, updated_at = NOW() WHERE id = $2 AND station_id = $3 AND guest_link_id IS NULL",
+    )
+    .bind(display_name)
+    .bind(id)
+    .bind(state.station_id)
+    .execute(&state.pool)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Serialize)]
 pub struct LiveSessionResponse {
     id: Uuid,
@@ -1734,6 +1766,13 @@ async fn expire_stale_sessions(state: &AppState) -> Result<(), ApiError> {
     .await?;
     sqlx::query(
         "UPDATE sessions s SET status = 'expired', approval_expires_at = NULL, updated_at = NOW() WHERE s.station_id = $1 AND s.status IN ('pending', 'approved', 'connected', 'disconnected', 'timed_out') AND (s.expires_at <= NOW() OR EXISTS (SELECT 1 FROM guest_links gl WHERE gl.id = s.guest_link_id AND gl.station_id = s.station_id AND (gl.invalidated_at IS NOT NULL OR gl.expires_at <= NOW())))",
+    )
+    .bind(state.station_id)
+    .execute(&state.pool)
+    .await?;
+    // Host consoles that closed without reporting a disconnect would otherwise linger as ghosts.
+    sqlx::query(
+        "UPDATE sessions SET status = 'expired', updated_at = NOW() WHERE station_id = $1 AND guest_link_id IS NULL AND role IN ('host', 'co_host') AND status IN ('approved', 'disconnected') AND updated_at < NOW() - INTERVAL '2 minutes'",
     )
     .bind(state.station_id)
     .execute(&state.pool)

@@ -158,6 +158,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(routes::list_live_sessions).post(routes::create_live_session),
         )
         .route(
+            "/api/live-sessions/{id}",
+            axum::routing::patch(routes::rename_live_session),
+        )
+        .route(
             "/api/live-sessions/{id}/approve",
             axum::routing::post(routes::approve_guest_session),
         )

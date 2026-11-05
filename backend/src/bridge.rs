@@ -13,33 +13,72 @@ use uuid::Uuid;
 
 use crate::{janus, AppState};
 
-const ENGINE_LISTEN_PORT: u16 = 10500;
+const PROGRAM_LISTEN_PORT: u16 = 10500;
+const CUE_LISTEN_PORT: u16 = 10501;
 const PAYLOAD_TYPE: u8 = 100;
 const POLL_TIMEOUT: Duration = Duration::from_secs(12);
 
+#[derive(Clone, Copy)]
+enum Bus {
+    Program,
+    Cue,
+}
+
+impl Bus {
+    fn listen_port(self) -> u16 {
+        match self {
+            Bus::Program => PROGRAM_LISTEN_PORT,
+            Bus::Cue => CUE_LISTEN_PORT,
+        }
+    }
+
+    fn display(self) -> &'static str {
+        match self {
+            Bus::Program => "Cloud Console Engine",
+            Bus::Cue => "Cloud Console Engine Cue",
+        }
+    }
+
+    fn engine_path(self) -> &'static str {
+        match self {
+            Bus::Program => "bridge",
+            Bus::Cue => "bridge/cue",
+        }
+    }
+
+    fn room(self, state: &AppState) -> u64 {
+        match self {
+            Bus::Program => state.janus_room_id,
+            Bus::Cue => state.janus_cue_room_id,
+        }
+    }
+}
+
 pub async fn run(state: AppState) {
+    tokio::join!(
+        run_bus(state.clone(), Bus::Program),
+        run_bus(state, Bus::Cue)
+    );
+}
+
+async fn run_bus(state: AppState, bus: Bus) {
     loop {
-        if let Err(error) = session(&state).await {
-            tracing::warn!(%error, "Janus audio bridge session ended");
+        if let Err(error) = session(&state, bus).await {
+            tracing::warn!(%error, bus = bus.display(), "Janus audio bridge session ended");
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
-async fn session(state: &AppState) -> Result<(), String> {
+async fn session(state: &AppState, bus: Bus) -> Result<(), String> {
     let base = state.janus_http_url.trim_end_matches('/').to_owned();
     let engine_ip = resolve(&state.audio_engine_url).await?;
     let janus_ip = resolve(&base).await?;
+    let room = bus.room(state);
 
     {
         let _guard = state.janus_room_lock.lock().await;
-        janus::ensure_audio_room(
-            &state.http_client,
-            &base,
-            state.janus_room_id,
-            &state.janus_room_pin,
-        )
-        .await?;
+        janus::ensure_audio_room(&state.http_client, &base, room, &state.janus_room_pin).await?;
     }
 
     let created = post(state, &base, json!({ "janus": "create" })).await?;
@@ -66,11 +105,11 @@ async fn session(state: &AppState) -> Result<(), String> {
             "janus": "message",
             "body": {
                 "request": "join",
-                "room": state.janus_room_id,
+                "room": room,
                 "pin": state.janus_room_pin,
-                "display": "Cloud Console Engine",
+                "display": bus.display(),
                 "codec": "opus",
-                "rtp": { "ip": engine_ip.to_string(), "port": ENGINE_LISTEN_PORT, "payload_type": PAYLOAD_TYPE }
+                "rtp": { "ip": engine_ip.to_string(), "port": bus.listen_port(), "payload_type": PAYLOAD_TYPE }
             }
         }),
     )
@@ -79,11 +118,15 @@ async fn session(state: &AppState) -> Result<(), String> {
     let mut target = joined_target(&joined);
     loop {
         if let Some((port, payload_type)) = target {
-            ensure_engine_bridge(state, janus_ip, port, payload_type).await?;
+            ensure_engine_bridge(state, bus, janus_ip, port, payload_type).await?;
         }
         let event = poll(state, &session_url).await?;
         if let Some(found) = joined_target(&event) {
-            tracing::info!(port = found.0, "audio engine joined the Janus Program room");
+            tracing::info!(
+                port = found.0,
+                bus = bus.display(),
+                "audio engine joined Janus"
+            );
             target = Some(found);
         }
         if event.pointer("/plugindata/data/error_code").is_some() {
@@ -122,11 +165,16 @@ fn joined_target(response: &Value) -> Option<(u16, u8)> {
 
 async fn ensure_engine_bridge(
     state: &AppState,
+    bus: Bus,
     janus_ip: IpAddr,
     port: u16,
     payload_type: u8,
 ) -> Result<(), String> {
-    let url = format!("{}/bridge", state.audio_engine_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/{}",
+        state.audio_engine_url.trim_end_matches('/'),
+        bus.engine_path()
+    );
     let status: Value = state
         .http_client
         .get(&url)
@@ -144,7 +192,7 @@ async fn ensure_engine_bridge(
         .http_client
         .put(&url)
         .json(&json!({
-            "listen_port": ENGINE_LISTEN_PORT,
+            "listen_port": bus.listen_port(),
             "remote_host": janus_ip.to_string(),
             "remote_port": port,
             "payload_type": payload_type,
