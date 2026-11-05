@@ -113,6 +113,15 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
     };
   }, [participant?.session_id]);
 
+  // A dropped, expired or rejected host session can never reconnect; start a fresh one.
+  const ownStatus = sessions.data?.find((item) => item.id === participant?.session_id)?.status;
+  useEffect(() => {
+    if (ownStatus && !["approved", "connected", "disconnected"].includes(ownStatus)) {
+      sessionStorage.removeItem(PARTICIPANT_KEY);
+      setParticipant(null);
+    }
+  }, [ownStatus]);
+
   const localMonitorBus = localChoice === "cue" ? "cue" : "program";
   const live = useLiveAudio({
     participant,
