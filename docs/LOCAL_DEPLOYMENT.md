@@ -15,33 +15,111 @@ Files: [docker-compose.local.yml](../docker-compose.local.yml) (pins ports to a 
 together with `docker-compose.yml` and `docker-compose.prod.yml`) and the helper scripts in
 `deploy/local/`.
 
-Requirements: Docker Engine with Compose 2.24 or newer (`docker compose version`), `openssl`,
-and the repository checked out on the server.
+> Status: the overlay and scripts were validated with `docker compose config` and a script
+> test in a Linux container. They have not yet been run on your server.
 
-> Status: the Compose overlay and scripts were validated with `docker compose config` and
-> a script test in a Linux container. They have not yet been run on your server.
+## Quick answers
 
-## 1. Create a station
+- **Where does it come from?** `install.sh` clones the GitHub repository
+  (https://github.com/asalive1/CloudConsole) onto the server. Docker then **builds the images
+  on the server** from that code the first time you start a station (about 10 to 25
+  minutes). Nothing else needs to be downloaded by hand. The compose files do not pull from
+  GitHub themselves; the clone is the code.
+- **Will I be prompted?** Yes. Run `./deploy/local/new-station.sh` with no arguments and it
+  asks for the station name, slot and address (Enter accepts the default). You can also pass
+  them in one line: `./deploy/local/new-station.sh andy 1 192.168.50.207`.
+- **Where are the .env files?** One per station, in `/opt/CloudConsole/deploy/local/stations/<name>.env`
+  (for example `andy.env`). They are created for you and are never uploaded to GitHub.
+  You do not need to create or edit `.env` by hand.
+- **Names:** station names are lowercase; `ANDY` becomes `andy`.
+
+## Step by step
+
+All commands are typed on the server (SSH or console). Replace `andy` with your station name.
+
+### Step 1. Install the tools (once)
+
+On Ubuntu/Debian:
+
+```bash
+sudo apt update
+sudo apt install -y git openssl curl
+curl -fsSL https://get.docker.com | sudo sh        # installs Docker and the Compose plugin
+sudo usermod -aG docker $USER                      # then log out and back in
+docker compose version                             # must print v2.24 or newer
+```
+
+### Step 2. Download the code (once)
+
+```bash
+sudo mkdir -p /opt/CloudConsole && sudo chown $USER /opt/CloudConsole
+curl -fsSL https://raw.githubusercontent.com/asalive1/CloudConsole/main/deploy/local/install.sh | bash
+cd /opt/CloudConsole
+```
+
+(Or do it by hand: `git clone https://github.com/asalive1/CloudConsole.git /opt/CloudConsole`
+then `chmod +x /opt/CloudConsole/deploy/local/*.sh`.)
+
+### Step 3. Create the station
 
 ```bash
 cd /opt/CloudConsole
-chmod +x deploy/local/*.sh
-deploy/local/new-station.sh wxyz 0        # name, slot 0-9
-deploy/local/station.sh wxyz up           # builds and starts (first build takes several minutes)
-deploy/local/station.sh wxyz ps
+./deploy/local/new-station.sh
 ```
 
-`new-station.sh` writes `deploy/local/stations/wxyz.env` (mode 600, git-ignored) with random
-secrets and the station's ports, and prints the **station API key**. If the NIC addresses
-differ, set them first: `AUDIO_IP=... DATA_IP=... deploy/local/new-station.sh wxyz 0`.
+It asks:
 
-Janus advertises one address to browsers for microphone media (`JANUS_PUBLIC_ADDRESS`). It
-defaults to the data NIC (192.168.50.207), which works for users on your LAN. For remote users
-or guests, pass your public IP as the third argument
-(`deploy/local/new-station.sh wxyz 0 203.0.113.10`) and forward the UDP ports below on your
-router to 192.168.50.207.
+1. **Station name**: for example `andy`.
+2. **Slot (0-9)**: it suggests the next free one. Each station needs a different slot,
+   because the slot decides the ports (slot 0 = web port 8080, slot 1 = 8081, and so on).
+3. **Address browsers use for microphone audio**: press Enter for 192.168.50.207. Enter your
+   public IP instead only if guests connect from the internet.
 
-## 2. Multiple stations
+At the end it prints **your station API key** (this is the sign-in password for the station)
+and the list of ports. Copy the key somewhere safe. You can see it again any time:
+`grep STATION_API_KEY deploy/local/stations/andy.env`.
+
+### Step 4. Start it
+
+```bash
+./deploy/local/station.sh andy up      # first time: builds everything, be patient
+./deploy/local/station.sh andy ps      # every service should say "running" / "healthy"
+curl -I http://192.168.50.207:8080/api/health     # expect HTTP 200 (use your slot's port)
+```
+
+### Step 5. Add it to Nginx Proxy Manager
+
+See section 4 below. After that, open `https://andy.example.com/` and sign in with the API key.
+
+### Step 6. Update later
+
+```bash
+cd /opt/CloudConsole
+./deploy/local/station.sh andy update      # git pull + rebuild + restart
+```
+
+Run `update` for every station. Your settings and data are kept.
+
+## What the secrets and IDs in the env file mean
+
+You never have to type these; `new-station.sh` generates them.
+
+| Setting | What it is |
+|---|---|
+| `STATION_API_KEY` | The operator/admin password for this station. Different for every station. |
+| `GUEST_JWT_SECRET` | Internal key that signs guest and mic session tokens. Keep private. |
+| `STATION_ID` | A random unique ID for this station inside its own database. |
+| `POSTGRES_PASSWORD` | Password for this station's private database. Not used from outside. |
+| `JANUS_ROOM_ID` | The number of the audio "room" inside the Janus audio server where all microphones meet. Optional; the default (4815162342) is fine. Every station has its own Janus, so stations can share the same number without clashing. |
+| `JANUS_CUE_ROOM_ID` | Same idea for the Cue bus. Leave it blank (the console derives one). |
+| `JANUS_ROOM_PIN` | The room's password. The console and Janus use it between themselves; users never see it. |
+| `WHIP_WHEP_USERNAME` / `PASSWORD` | Login for the optional WHIP/WHEP stream endpoint. |
+| `AUDIO_BIND` / `DATA_BIND` / `METADATA_BIND` | Which NIC address each group of ports is published on (eno3 audio, eno4 data). |
+| `HTTP_PORT`, `ENGINE_UDP_PORTS`, `METADATA_TCP_PORTS`, `JANUS_RTP_PORT_RANGE`, `MEDIAMTX_UDP_PORT` | The ports for this station's slot. |
+
+The sample [.env.example](../.env.example) is only for developers running a single station
+on a laptop. Ignore it for the server.
+## 2. Multiple stations (slots and ports)
 
 Give each station its own name and slot. Slots never overlap:
 

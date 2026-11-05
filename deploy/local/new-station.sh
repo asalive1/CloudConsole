@@ -1,24 +1,38 @@
 #!/usr/bin/env bash
 # Creates the configuration for one station on the local server.
-# Usage: new-station.sh <name> <slot 0-9> [janus-address]
+# Usage: new-station.sh                      (asks questions)
+#        new-station.sh <name> <slot 0-9> [janus-address]
 #   name           lowercase letters, digits and dashes; becomes the Compose project cc-<name>
 #   slot           0-9; selects a non-overlapping port block
 #   janus-address  address browsers use for WebRTC media (default: the data NIC address)
 # Override the NIC addresses with AUDIO_IP and DATA_IP in the environment.
 set -euo pipefail
 
-if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
-    sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
-    exit 2
-fi
-name=$1
-slot=$2
 audio_ip=${AUDIO_IP:-192.168.87.207}
 data_ip=${DATA_IP:-192.168.50.207}
-janus_ip=${3:-$data_ip}
-
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 dir="$root/deploy/local/stations"
+
+if [ "$#" -gt 3 ]; then
+    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+fi
+if [ "$#" -eq 0 ]; then
+    echo "Create a new station. Press Enter to accept the value in [brackets]."
+    read -r -p "Station name (letters, numbers, dashes, e.g. andy): " name
+    used=$(grep -h '^STATION_SLOT=' "$dir"/*.env 2>/dev/null | cut -d= -f2 | tr '\n' ' ' || true)
+    next=0
+    while [[ " $used " == *" $next "* ]]; do next=$((next + 1)); done
+    read -r -p "Slot number 0-9 (gives this station its own ports) [$next]: " slot
+    slot=${slot:-$next}
+    read -r -p "Address browsers use for microphone audio [$data_ip]: " janus_ip
+    janus_ip=${janus_ip:-$data_ip}
+else
+    name=$1
+    slot=${2:-}
+    janus_ip=${3:-$data_ip}
+fi
+name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
 env_file="$dir/$name.env"
 
 [[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || { echo "invalid station name: $name" >&2; exit 2; }

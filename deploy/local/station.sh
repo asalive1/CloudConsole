@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs Docker Compose for one local station (base + production + local overlays).
-# Usage: station.sh <name> <up|down|restart|logs|ps|build|config|backup> [extra compose arguments]
+# Usage: station.sh <name> <up|down|restart|logs|ps|build|config|backup|update> [extra compose arguments]
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -26,6 +26,10 @@ case "$action" in
     ps) exec "${compose[@]}" ps "$@" ;;
     build) exec "${compose[@]}" build "$@" ;;
     config) exec "${compose[@]}" config "$@" ;;
+    update)
+        git -C "$root" pull --ff-only
+        exec "${compose[@]}" up -d --build "$@"
+        ;;
     backup)
         out="${1:-$root/deploy/local/backups}"
         mkdir -p "$out"
