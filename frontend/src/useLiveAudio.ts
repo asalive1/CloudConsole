@@ -309,9 +309,15 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
             element.autoplay = true;
             remoteAudio.current.set(bus, element);
           }
-          element.srcObject = new MediaStream([track]);
+          const stream = new MediaStream([track]);
+          if (element.srcObject instanceof MediaStream && element.srcObject.getTracks()[0]?.id === track.id) {
+            applyMonitor();
+            return;
+          }
+          element.srcObject = stream;
           applyMonitor();
           void element.play().catch((cause: unknown) => {
+            if (cause instanceof DOMException && cause.name === "AbortError") return;
             setError(`Click the page to enable monitor audio: ${errorMessage(cause)}`);
           });
         },
@@ -402,6 +408,9 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
 
 function startLocalMeter(track: MediaStreamTrack, report: (db: number) => void): () => void {
   const context = new AudioContext();
+  void context.resume().catch(() => undefined);
+  const resumeOnClick = () => void context.resume().catch(() => undefined);
+  window.addEventListener("pointerdown", resumeOnClick);
   const analyser = context.createAnalyser();
   analyser.fftSize = 1024;
   context.createMediaStreamSource(new MediaStream([track])).connect(analyser);
@@ -414,6 +423,7 @@ function startLocalMeter(track: MediaStreamTrack, report: (db: number) => void):
   }, 100);
   return () => {
     window.clearInterval(timer);
+    window.removeEventListener("pointerdown", resumeOnClick);
     void context.close().catch(() => undefined);
   };
 }
