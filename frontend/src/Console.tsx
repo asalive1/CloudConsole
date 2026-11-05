@@ -254,6 +254,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
           {prefs.active && ownChannel && (
             <Strip
               channel={{ ...ownChannel, display_name: `${prefs.name || "Me"} (you)` }}
+              peak={ownChannel.channel_id in live.levels ? [live.levels[ownChannel.channel_id]] : null}
               onChange={(body) => void patchChannel(ownChannel.channel_id, body)}
             />
           )}
@@ -261,6 +262,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
             <Strip
               key={channel.channel_id}
               channel={channel}
+              peak={channel.channel_id in live.levels ? [live.levels[channel.channel_id]] : null}
               onChange={(body) => void patchChannel(channel.channel_id, body)}
               onDisconnect={() => void session(channel.channel_id, "disconnect")}
             />

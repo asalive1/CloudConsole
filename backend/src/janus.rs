@@ -87,6 +87,9 @@ async fn ensure_room_in_session(
             "is_private": true,
             "sampling_rate": 48000,
             "use_limiter": true,
+            "audiolevel_event": true,
+            "audio_active_packets": 10,
+            "audio_level_average": 60,
             "allow_rtp_participants": true,
             "permanent": false
         }),

@@ -36,6 +36,8 @@ export type LiveAudioState = {
   error: string;
   connected: boolean;
   channel: MixerChannel | null;
+  // Approximate dBFS per session id, from Janus talking events and the local microphone.
+  levels: Record<string, number>;
 };
 
 const PLUGIN = "janus.plugin.audiobridge";
@@ -58,7 +60,19 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
   const [channel, setChannel] = useState<MixerChannel | null>(null);
+  const [levels, setLevels] = useState<Record<string, number>>({});
+  const roomNames = useRef(new Map<number, string>());
+  const meterStop = useRef<(() => void) | null>(null);
 
+  const setLevel = (id: string, db: number | null) =>
+    setLevels((previous) => {
+      if (db === null) {
+        if (!(id in previous)) return previous;
+        const { [id]: _removed, ...rest } = previous;
+        return rest;
+      }
+      return { ...previous, [id]: db };
+    });
   const optionsRef = useRef(options);
   optionsRef.current = options;
   const channelRef = useRef<MixerChannel | null>(null);
@@ -213,6 +227,27 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
       });
     };
 
+    const trackRoomLevels = (event: JanusMessage) => {
+      const names = roomNames.current;
+      const list = event.participants as { id: number; display?: string }[] | undefined;
+      if (Array.isArray(list)) for (const item of list) if (item.display) names.set(item.id, item.display);
+      const id = event.id as number | undefined;
+      if (typeof id !== "number") return;
+      if (event.audiobridge === "joined") names.set(id, session.session_id);
+      const name = names.get(id);
+      if (event.audiobridge === "event" && event.leaving !== undefined) {
+        const gone = event.leaving as number;
+        const goneName = names.get(gone);
+        if (goneName) setLevel(goneName, null);
+        names.delete(gone);
+      } else if (event.audiobridge === "talking" && name && name !== session.session_id) {
+        const avg = Number(event["audio-level-dBov-avg"] ?? event["audio-level-dBov"] ?? 30);
+        setLevel(name, -Math.abs(avg) / 2);
+      } else if (event.audiobridge === "stopped-talking" && name) {
+        if (name !== session.session_id) setLevel(name, null);
+      }
+    };
+
     const attachRoom = (bus: Bus, config: ConnectionConfig, roomId: number) => {
       const pluginOptions = {
         plugin: PLUGIN,
@@ -223,7 +258,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
             message: {
               request: "join",
               room: roomId,
-              display: session.display_name,
+              display: session.session_id,
               pin: config.room_pin,
               muted: true,
             },
@@ -237,14 +272,20 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
           const event = pluginData(message);
           if (jsep) handles.current.get(bus)?.handleRemoteJsep({ jsep });
           if (event.audiobridge === "joined") publish(bus);
+          if (bus === "program") trackRoomLevels(event);
           if (typeof event.error === "string") setError(`${bus} audio error: ${event.error}`);
         },
         onlocaltrack: (track: MediaStreamTrack, added: boolean) => {
           if (bus !== "program" || track.kind !== "audio") return;
           if (!added) {
             sidetoneAudio.current = null;
+            meterStop.current?.();
+            meterStop.current = null;
+            setLevel(session.session_id, null);
             return;
           }
+          meterStop.current?.();
+          meterStop.current = startLocalMeter(track, (db) => setLevel(session.session_id, db));
           const element = new Audio();
           element.srcObject = new MediaStream([track]);
           sidetoneAudio.current = element;
@@ -299,6 +340,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
     const start = async () => {
       if (stopped) return;
       wasConnected = false;
+      roomNames.current.clear();
       janus?.destroy({});
       janus = null;
       cleanup();
@@ -355,7 +397,25 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
     };
   }, [participant?.session_id, participant?.access_token, mode, inputDeviceId]);
 
-  return { status, error, connected, channel };
+  return { status, error, connected, channel, levels };
+}
+
+function startLocalMeter(track: MediaStreamTrack, report: (db: number) => void): () => void {
+  const context = new AudioContext();
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 1024;
+  context.createMediaStreamSource(new MediaStream([track])).connect(analyser);
+  const samples = new Float32Array(analyser.fftSize);
+  const timer = window.setInterval(() => {
+    analyser.getFloatTimeDomainData(samples);
+    let sum = 0;
+    for (const value of samples) sum += value * value;
+    report(20 * Math.log10(Math.sqrt(sum / samples.length) + 1e-6));
+  }, 100);
+  return () => {
+    window.clearInterval(timer);
+    void context.close().catch(() => undefined);
+  };
 }
 
 function pluginData(message: JanusMessage): JanusMessage {
