@@ -4,17 +4,16 @@ import { apiRequest, errorMessage, type DelayStatus } from "./api";
 type Props = {
   apiKey?: string;
   accessToken?: string;
-  adminHref?: string;
 };
 
 const STATE_LABEL: Record<DelayStatus["state"], string> = {
-  normal: "Delay ready",
+  normal: "Ready",
   live: "Delay off",
   rebuilding: "Building",
   ending_delay: "Ending",
 };
 
-export default function DelayControls({ apiKey, accessToken, adminHref }: Props) {
+export default function DelayControls({ apiKey, accessToken }: Props) {
   const [status, setStatus] = useState<DelayStatus | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -65,42 +64,39 @@ export default function DelayControls({ apiKey, accessToken, adminHref }: Props)
   const percent = target > 0 ? Math.min(100, (buffered / target) * 100) : 0;
   const state = status?.state ?? "normal";
 
+  if (status && status.enabled === false) return null;
+
   return (
-    <section className={`card delay-card state-${state}`} aria-label="Profanity delay">
-      <div className="delay-readout">
-        <div>
-          <span className="label">Delay buffer</span>
-          <strong className="delay-value">{buffered.toFixed(1)}s</strong>
-          <span className="muted"> / {target.toFixed(0)}s</span>
+    <div className={`strip delay-strip state-${state}`} aria-label="Profanity delay">
+      <span className="strip-name delay-value" title="Delay buffer / target">
+        {buffered.toFixed(1)}s<span className="muted">/{target.toFixed(0)}s</span>
+      </span>
+      <span className={`chip chip-${state}`}>{status ? STATE_LABEL[state] : "…"}</span>
+      <div className="strip-body delay-body">
+        <div className="vbar" aria-hidden="true">
+          <div className="vbar-fill" style={{ height: `${percent}%` }} />
         </div>
-        <span className={`chip chip-${state}`}>{status ? STATE_LABEL[state] : "…"}</span>
-        <div className="delay-bar" aria-hidden="true">
-          <div className="bar-fill" style={{ width: `${percent}%` }} />
-        </div>
-      </div>
-      <div className="delay-actions">
         <button type="button" className="btn btn-dump" disabled={busy || !status || buffered <= 0.05} onClick={() => void act("dump")}>
           DUMP
         </button>
-        <button
-          type="button"
-          className="btn btn-build"
-          disabled={busy || !status || state === "rebuilding" || buffered >= target - 0.05}
-          onClick={() => void act("build")}
-        >
-          Build delay
-        </button>
-        <button
-          type="button"
-          className="btn"
-          disabled={busy || !status || state === "ending_delay" || buffered <= 0.05}
-          onClick={() => void act("end")}
-        >
-          End delay
-        </button>
-        {adminHref && <a className="link-small" href={adminHref}>Set time</a>}
       </div>
-      {error && <p className="error" role="alert">{error}</p>}
-    </section>
+      <button
+        type="button"
+        className="btn btn-small btn-build"
+        disabled={busy || !status || state === "rebuilding" || buffered >= target - 0.05}
+        onClick={() => void act("build")}
+      >
+        Build
+      </button>
+      <button
+        type="button"
+        className="btn btn-small"
+        disabled={busy || !status || state === "ending_delay" || buffered <= 0.05}
+        onClick={() => void act("end")}
+      >
+        End
+      </button>
+      {error && <span className="small error" role="alert" title={error}>!</span>}
+    </div>
   );
 }

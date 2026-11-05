@@ -1,0 +1,1 @@
+ALTER TABLE station_delay_settings ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT TRUE;

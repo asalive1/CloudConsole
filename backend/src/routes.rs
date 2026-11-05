@@ -134,7 +134,25 @@ pub async fn proxy_audio(
 
 #[derive(Deserialize)]
 pub struct ConfigureDelayRequest {
-    delay_seconds: u32,
+    delay_seconds: Option<u32>,
+    enabled: Option<bool>,
+}
+
+async fn delay_enabled(state: &AppState) -> Result<bool, ApiError> {
+    let enabled: Option<bool> =
+        sqlx::query_scalar("SELECT enabled FROM station_delay_settings WHERE station_id = $1")
+            .bind(state.station_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    Ok(enabled.unwrap_or(true))
+}
+
+async fn delay_status_with_enabled(state: &AppState) -> Result<Json<Value>, ApiError> {
+    let mut status = delay_engine_request(state, reqwest::Method::GET, "", None).await?;
+    if let Some(object) = status.as_object_mut() {
+        object.insert("enabled".to_owned(), json!(delay_enabled(state).await?));
+    }
+    Ok(Json(status))
 }
 
 pub async fn get_delay_status(
@@ -142,9 +160,7 @@ pub async fn get_delay_status(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize_delay_operator(&headers, &state).await?;
-    Ok(Json(
-        delay_engine_request(&state, reqwest::Method::GET, "", None).await?,
-    ))
+    delay_status_with_enabled(&state).await
 }
 
 pub async fn configure_delay(
@@ -153,27 +169,41 @@ pub async fn configure_delay(
     Json(request): Json<ConfigureDelayRequest>,
 ) -> Result<Json<Value>, ApiError> {
     authorize_delay_operator(&headers, &state).await?;
-    if !(5..=60).contains(&request.delay_seconds) {
-        return Err(ApiError::InvalidRequest(
-            "delay_seconds must be between 5 and 60".to_owned(),
-        ));
-    }
-    sqlx::query(
-        "INSERT INTO station_delay_settings (station_id, delay_seconds) VALUES ($1, $2) ON CONFLICT (station_id) DO UPDATE SET delay_seconds = EXCLUDED.delay_seconds, updated_at = NOW()",
-    )
-    .bind(state.station_id)
-    .bind(request.delay_seconds as i16)
-    .execute(&state.pool)
-    .await?;
-    Ok(Json(
+    if let Some(seconds) = request.delay_seconds {
+        if !(5..=60).contains(&seconds) {
+            return Err(ApiError::InvalidRequest(
+                "delay_seconds must be between 5 and 60".to_owned(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO station_delay_settings (station_id, delay_seconds) VALUES ($1, $2) ON CONFLICT (station_id) DO UPDATE SET delay_seconds = EXCLUDED.delay_seconds, updated_at = NOW()",
+        )
+        .bind(state.station_id)
+        .bind(seconds as i16)
+        .execute(&state.pool)
+        .await?;
         delay_engine_request(
             &state,
             reqwest::Method::PATCH,
             "/config",
-            Some(json!({ "delay_seconds": request.delay_seconds })),
+            Some(json!({ "delay_seconds": seconds })),
         )
-        .await?,
-    ))
+        .await?;
+    }
+    if let Some(enabled) = request.enabled {
+        sqlx::query(
+            "INSERT INTO station_delay_settings (station_id, enabled) VALUES ($1, $2) ON CONFLICT (station_id) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = NOW()",
+        )
+        .bind(state.station_id)
+        .bind(enabled)
+        .execute(&state.pool)
+        .await?;
+        if !enabled {
+            // Drain any buffered audio so a hidden delay cannot keep Program late.
+            let _ = delay_engine_request(&state, reqwest::Method::POST, "/end", None).await;
+        }
+    }
+    delay_status_with_enabled(&state).await
 }
 
 pub async fn dump_delay(

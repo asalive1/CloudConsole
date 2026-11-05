@@ -63,6 +63,7 @@ export type DelayStatus = {
   configured_delay_seconds: number;
   buffered_delay_seconds: number;
   recovery_percent: number;
+  enabled?: boolean;
   state: "normal" | "rebuilding" | "ending_delay" | "live";
 };
 

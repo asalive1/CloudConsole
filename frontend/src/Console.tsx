@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import DelayControls from "./DelayControls";
+
+declare const __APP_VERSION__: string;
+const APP_VERSION = __APP_VERSION__;
 import { deviceLabel, useAudioDevices } from "./useAudioDevices";
 import { useLiveAudio } from "./useLiveAudio";
 import {
@@ -226,7 +229,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
       <header className="bar">
         <strong className="brand">{station.data?.name || "Cloud Console"}</strong>
         <span className={`chip ${metrics.data?.pipeline_state === "playing" ? "chip-live" : ""}`}>
-          {metrics.data ? metrics.data.pipeline_state : metrics.error ? "engine offline" : "…"}
+          {metrics.data ? (metrics.data.pipeline_state === "playing" ? "On-Air" : metrics.data.pipeline_state) : metrics.error ? "engine offline" : "…"}
         </span>
         <button type="button" className="btn btn-small" onClick={onSignOut}>Sign out</button>
       </header>
@@ -241,9 +244,8 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
           <div className="hmeter-fill" style={{ width: `${dbToPercent(programMeter ? Math.max(...programMeter) : null)}%` }} />
         </div>
       </section>
-      <DelayControls apiKey={apiKey} adminHref="/admin#delay" />
-
       <section className="strips" aria-label="Input faders">
+        <DelayControls apiKey={apiKey} />
         {sources.length === 0 && <p className="muted pad">No audio inputs configured. Add one in Station admin.</p>}
         {sources.map((channel) => (
           <Strip
@@ -256,8 +258,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
         ))}
       </section>
 
-      <section className="card" aria-label="Connected microphones">
-        <h2>Connected microphones</h2>
+      <section className="card mics" aria-label="Connected microphones">
         {pending.map((guest) => (
           <div key={guest.id} className="row">
             <span>{guest.display_name} <span className="chip">waiting</span></span>
@@ -342,24 +343,25 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
       </section>
 
       <section className="card" aria-label="Local user">
-        <h2>My microphone</h2>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={prefs.active}
-            onChange={(event) => setPrefs({ ...prefs, active: event.target.checked })}
-          />
-          <span className="slider" />
-          <span>{prefs.active ? "Activated — on the console" : "Activate session"}</span>
-        </label>
-        <p className="muted small">
-          {prefs.active ? live.status : "Not active: your microphone is not sent. You can still listen to the monitor."}
-        </p>
-        {prefs.active && (
-          <button type="button" className={`btn btn-small ${micMuted ? "btn-on" : ""}`} onClick={() => setMicMuted(!micMuted)}>
-            {micMuted ? "Unmute my mic" : "Mute my mic"}
-          </button>
-        )}
+        <div className="my-mic">
+          <label className="switch" title="Activate your microphone on the console">
+            <input
+              type="checkbox"
+              checked={prefs.active}
+              onChange={(event) => setPrefs({ ...prefs, active: event.target.checked })}
+            />
+            <span className="slider" />
+            <span>{prefs.active ? "My mic active" : "Activate my mic"}</span>
+          </label>
+          <span className="muted small my-mic-status" title={prefs.active ? live.status : "Not active: your microphone is not sent."}>
+            {prefs.active ? live.status : "Listening only"}
+          </span>
+          {prefs.active && (
+            <button type="button" className={`btn btn-small ${micMuted ? "btn-on" : ""}`} onClick={() => setMicMuted(!micMuted)}>
+              {micMuted ? "Unmute" : "Mute"}
+            </button>
+          )}
+        </div>
         {live.error && <p className="error" role="alert">{live.error}</p>}
       </section>
 
@@ -412,8 +414,8 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
         ))}
       </details>
 
-      <section className="card stats" aria-label="Audio stream statistics">
-        <h2>Audio stream statistics</h2>
+      <details className="card stats" aria-label="Audio stream statistics">
+        <summary>Audio stream statistics</summary>
         {metrics.error && <p className="error">{metrics.error}</p>}
         <table>
           <thead>
@@ -438,11 +440,12 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
           </tbody>
         </table>
         {metrics.data?.last_pipeline_error && <p className="error">{metrics.data.last_pipeline_error}</p>}
-      </section>
+      </details>
 
       <footer className="foot">
         <a href="/admin">Station admin · audio routing</a>
         <a href="/api/docs">API</a>
+        <span className="version">v{APP_VERSION}</span>
       </footer>
     </main>
   );

@@ -584,6 +584,20 @@ function DelaySettings({ apiKey, onError }: { apiKey: string; onError: (message:
     }
   }
 
+  async function setEnabled(enabled: boolean) {
+    try {
+      await apiRequest("/delay", {
+        method: "PATCH",
+        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      status.refresh();
+      onError("");
+    } catch (cause) {
+      onError(errorMessage(cause));
+    }
+  }
+
   return (
     <section className="card">
       <h2>Profanity delay</h2>
@@ -594,6 +608,10 @@ function DelaySettings({ apiKey, onError }: { apiKey: string; onError: (message:
         </label>
         <button type="submit" className="btn btn-build">Save delay time</button>
       </form>
+      <label className="check" style={{ marginTop: 8 }}>
+        <input type="checkbox" checked={status.data?.enabled !== false} onChange={(event) => void setEnabled(event.target.checked)} />
+        Enable profanity delay (when off, the delay control is hidden from the console)
+      </label>
       <p className="muted small">
         Current buffer {status.data ? `${status.data.buffered_delay_seconds.toFixed(1)}s (${status.data.state})` : "â€¦"}. Use Build
         delay on the console to start building the buffer.
