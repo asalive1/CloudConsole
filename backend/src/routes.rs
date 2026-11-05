@@ -1276,7 +1276,7 @@ pub async fn disconnect_guest_session(
     expire_stale_sessions(&state).await?;
     let mut transaction = state.pool.begin().await?;
     let row = sqlx::query(
-        "UPDATE sessions SET status = 'rejected', approval_expires_at = NULL, updated_at = NOW() WHERE id = $1 AND station_id = $2 AND role = 'guest' AND status IN ('approved', 'connected', 'disconnected') RETURNING id, display_name, role, status, expires_at",
+        "UPDATE sessions SET status = 'rejected', approval_expires_at = NULL, updated_at = NOW() WHERE id = $1 AND station_id = $2 AND status IN ('approved', 'connected', 'disconnected') RETURNING id, display_name, role, status, expires_at",
     )
     .bind(id)
     .bind(state.station_id)

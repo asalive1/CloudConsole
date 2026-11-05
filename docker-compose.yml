@@ -7,8 +7,7 @@ services:
       BIND_ADDRESS: 0.0.0.0:8001
       RUST_LOG: info
     ports:
-      - "5005:5005/udp"
-      - "10000-10999:10000-10999/udp"
+      - "${ENGINE_UDP_PORTS:-5000-5049}:${ENGINE_UDP_PORTS:-5000-5049}/udp"
     expose:
       - "8001"
     restart: unless-stopped
@@ -20,7 +19,7 @@ services:
     environment:
       DOCKER_IP: ${JANUS_PUBLIC_ADDRESS:-}
     ports:
-      - "11000-11999:11000-11999/udp"
+      - "11000-11099:11000-11099/udp"
     expose:
       - "8088"
       - "8188"

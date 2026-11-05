@@ -70,6 +70,7 @@ function fieldsFor(direction: "input" | "output", type: string): FieldSpec[] {
       { key: "mode", label: "SRT mode", kind: "select", options: ["listener", "caller"], help: "Listener waits for a connection; caller connects out." },
       { key: "host", label: direction === "input" ? "Host (caller target or bind address)" : "Destination host", kind: "text", placeholder: direction === "input" ? "0.0.0.0" : "srt.example.com" },
       { key: "port", label: "Port", kind: "number", placeholder: "9000" },
+      { key: "interface", label: "Network interface", kind: "text", source: "nic", help: "Interface used for the SRT connection." },
       { key: "latency_ms", label: "Latency (ms)", kind: "number", placeholder: "120" },
       { key: "stream_id", label: "Stream ID", kind: "text" },
       { key: "passphrase", label: "Passphrase", kind: "password", help: "10–79 characters; leave empty for no encryption." },
@@ -85,7 +86,7 @@ function fieldsFor(direction: "input" | "output", type: string): FieldSpec[] {
       return [
         { key: "address", label: "Address (multicast group or bind)", kind: "text", placeholder: "239.0.0.1" },
         { key: "port", label: "Port", kind: "number", placeholder: "5004" },
-        { key: "multicast_interface", label: "Network interface", kind: "text", placeholder: "eth0", source: "nic" },
+        { key: "interface", label: "Network interface", kind: "text", source: "nic" },
         { key: "encoding", label: "Encoding", kind: "select", options: ["l24", "l16"] },
         { key: "channels", label: "Channels", kind: "select", options: CHANNELS },
         { key: "payload_type", label: "Payload type", kind: "number", placeholder: "96" },
@@ -95,6 +96,7 @@ function fieldsFor(direction: "input" | "output", type: string): FieldSpec[] {
     return [
       { key: "host", label: "Destination (unicast or multicast)", kind: "text", placeholder: "239.0.0.2" },
       { key: "port", label: "Port", kind: "number", placeholder: "5004" },
+      { key: "interface", label: "Network interface", kind: "text", source: "nic" },
       { key: "encoding", label: "Encoding", kind: "select", options: ["l24", "l16"] },
       { key: "channels", label: "Channels", kind: "select", options: CHANNELS },
       { key: "payload_type", label: "Payload type", kind: "number", placeholder: "96" },
@@ -104,6 +106,12 @@ function fieldsFor(direction: "input" | "output", type: string): FieldSpec[] {
     return [{ key: "frequency", label: "Tone frequency (Hz)", kind: "number", placeholder: "1000" }];
   }
   return [];
+}
+
+function legacyInterface(config: Cfg): Cfg {
+  if (config.multicast_interface && !config.interface) config.interface = config.multicast_interface;
+  delete config.multicast_interface;
+  return config;
 }
 
 function defaultsFor(direction: "input" | "output", type: string): Cfg {
@@ -207,7 +215,7 @@ export default function AdminConsole() {
       {config && tab === "outputs" && (
         <Endpoints title="Audio outputs" kind="outputs" scope="output" config={config} apiKey={apiKey} api={api} />
       )}
-      {config && tab === "metadata" && <Metadata config={config} api={api} />}
+      {config && tab === "metadata" && <Metadata config={config} api={api} apiKey={apiKey} />}
       {tab === "delay" && <DelaySettings apiKey={apiKey} onError={setError} />}
       {tab === "routing" && (
         <section className="card">
@@ -273,7 +281,7 @@ function Endpoints({
     const resourceType = resource ? String((resource.config.type as string | undefined) ?? resource.type ?? "srt") : "srt";
     setType(resourceType);
     setEnabled(resource?.enabled ?? true);
-    setValues(resource ? { ...resource.config } : defaultsFor(direction, resourceType));
+    setValues(resource ? legacyInterface({ ...resource.config }) : defaultsFor(direction, resourceType));
   }
 
   function changeType(next: string) {
@@ -417,34 +425,49 @@ function Endpoints({
 
 function summary(config: Cfg): string {
   const parts: string[] = [];
-  for (const key of ["device", "mode", "host", "address", "port", "multicast_interface"]) {
-    if (config[key] !== undefined && config[key] !== "") parts.push(`${key === "multicast_interface" ? "nic" : key}: ${String(config[key])}`);
+  for (const key of ["device", "mode", "host", "address", "port", "interface"]) {
+    if (config[key] !== undefined && config[key] !== "") parts.push(`${key === "interface" ? "nic" : key}: ${String(config[key])}`);
   }
   return parts.join(" · ");
 }
 
-function Metadata({ config, api }: { config: StationConfig; api: Api }) {
+function NicSelect({ value, onChange, interfaces }: { value: string; onChange: (value: string) => void; interfaces: SystemDevices["network_interfaces"] }) {
+  return (
+    <select value={value} onChange={(event) => onChange(event.target.value)}>
+      <option value="">Default (system routing)</option>
+      {interfaces.map((nic) => (
+        <option key={nic.name} value={nic.name}>{nic.name}{nic.addresses.length > 0 ? ` — ${nic.addresses.join(", ")}` : ""} ({nic.state})</option>
+      ))}
+      {value && !interfaces.some((nic) => nic.name === value) && <option value={value}>{value}</option>}
+    </select>
+  );
+}
+
+function Metadata({ config, api, apiKey }: { config: StationConfig; api: Api; apiKey: string }) {
+  const interfaces = usePolling<SystemDevices>("/audio/system/devices", apiKey, 15000).data?.network_interfaces ?? [];
   return (
     <>
-      <MetadataCard direction="input" config={config} api={api} />
-      <MetadataCard direction="output" config={config} api={api} />
+      <MetadataCard direction="input" config={config} api={api} interfaces={interfaces} />
+      <MetadataCard direction="output" config={config} api={api} interfaces={interfaces} />
     </>
   );
 }
 
-function MetadataCard({ direction, config, api }: { direction: "input" | "output"; config: StationConfig; api: Api }) {
+function MetadataCard({ direction, config, api, interfaces }: { direction: "input" | "output"; config: StationConfig; api: Api; interfaces: SystemDevices["network_interfaces"] }) {
   const existing = config.metadata.find((item) => item.direction === direction) ?? null;
   const [mode, setMode] = useState("server");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
+  const [nic, setNic] = useState("");
   const [enabled, setEnabled] = useState(true);
 
   useEffect(() => {
     setMode(String(existing?.config.mode ?? "server"));
     setHost(String(existing?.config.host ?? ""));
     setPort(String(existing?.config.port ?? ""));
+    setNic(String(existing?.config.interface ?? ""));
     setEnabled(existing?.enabled ?? true);
-  }, [existing?.id, existing?.config.mode, existing?.config.host, existing?.config.port, existing?.enabled]);
+  }, [existing?.id, existing?.config.mode, existing?.config.host, existing?.config.port, existing?.config.interface, existing?.enabled]);
 
   // Input: server accepts incoming data, client pulls. Output: client pushes, server waits for a puller.
   const needsHost = mode === "client";
@@ -458,7 +481,7 @@ function MetadataCard({ direction, config, api }: { direction: "input" | "output
       direction,
       format: "passthrough",
       enabled,
-      config: { mode, port: Number(port), ...(needsHost ? { host } : {}) },
+      config: { mode, port: Number(port), ...(needsHost ? { host } : {}), ...(nic ? { interface: nic } : {}) },
     };
     api.setBusy(true);
     api.setError("");
@@ -510,6 +533,10 @@ function MetadataCard({ direction, config, api }: { direction: "input" | "output
             <input type="number" min={1} max={65535} required value={port} onChange={(event) => setPort(event.target.value)} />
           </label>
         </div>
+        <label>
+          <span className="label">Network interface</span>
+          <NicSelect value={nic} onChange={setNic} interfaces={interfaces} />
+        </label>
         <label className="check"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> Enabled</label>
         <div className="row-actions">
           <button type="submit" className="btn btn-build" disabled={api.busy}>Save</button>

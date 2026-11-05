@@ -34,4 +34,4 @@ The Program bus has a null sink in addition to configured outputs so the pipelin
 
 ## Validation notes
 
-Linux container tests use `audiotestsrc` and `fakesink`. SRT AAC/MPEG-TS input and output were verified container-to-container. Compose publishes RTP input on UDP `5005` and SRT listener inputs on UDP `10000-10999`; external reachability still depends on host firewall and network configuration. Real ALSA hardware playback requires a Linux host/device. WebRTC signaling and participant connections are Phase 4.
+Linux container tests use `audiotestsrc` and `fakesink`. SRT AAC/MPEG-TS input and output were verified container-to-container. Compose publishes UDP `5000-5049` for RTP inputs and SRT listener inputs (override with `ENGINE_UDP_PORTS`, e.g. `ENGINE_UDP_PORTS=5000-5099`); configure inputs on ports within that range. External reachability still depends on host firewall and network configuration. Real ALSA hardware playback requires a Linux host/device. WebRTC signaling and participant connections are Phase 4.

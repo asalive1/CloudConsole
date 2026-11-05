@@ -40,7 +40,7 @@ The audio engine is internal to the Compose network. Station-authenticated engin
 
 ## Phase 4 media configuration
 
-Janus signaling is proxied at `/janus`; its WebRTC media range is UDP `11000-11999`. MediaMTX provides WHIP and WHEP at `/media/<stream-name>/whip` and `/media/<stream-name>/whep`, with WebRTC media on UDP `12000`. Both media services need inbound UDP reachability on their published ports for direct ICE connectivity.
+Janus signaling is proxied at `/janus`; its WebRTC media range is UDP `11000-11099` (about two ports per connected microphone per room). When testing on a single machine, set `JANUS_PUBLIC_ADDRESS=127.0.0.1` so browsers receive a reachable ICE candidate. MediaMTX provides WHIP and WHEP at `/media/<stream-name>/whip` and `/media/<stream-name>/whep`, with WebRTC media on UDP `12000`. Both media services need inbound UDP reachability on their published ports for direct ICE connectivity.
 
 Set `JANUS_PUBLIC_ADDRESS` to the public IP address when the host is behind 1:1 NAT. Configure `STUN_SERVER` and, where restrictive NAT or firewalls require relaying, `TURN_SERVER_URL`, `TURN_SERVER_USERNAME`, and `TURN_SERVER_CREDENTIAL`. MediaMTX stream endpoints use HTTP Basic authentication from `WHIP_WHEP_USERNAME` and `WHIP_WHEP_PASSWORD`. Janus WebSocket upgrades are authorized against the participant JWT before NGINX forwards the connection.
 

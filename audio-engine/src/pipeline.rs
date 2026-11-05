@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     net::IpAddr,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -88,8 +88,8 @@ pub enum InputTransport {
         payload_type: u8,
         #[serde(default = "default_jitter_buffer_ms")]
         jitter_buffer_ms: u32,
-        #[serde(default)]
-        multicast_interface: Option<String>,
+        #[serde(default, alias = "multicast_interface")]
+        interface: Option<String>,
     },
     Srt {
         #[serde(default = "default_srt_host")]
@@ -103,6 +103,8 @@ pub enum InputTransport {
         stream_id: Option<String>,
         #[serde(default)]
         passphrase: Option<String>,
+        #[serde(default)]
+        interface: Option<String>,
     },
     Alsa {
         device: String,
@@ -136,6 +138,8 @@ pub enum OutputTransport {
         channels: u8,
         #[serde(default = "default_payload_type")]
         payload_type: u8,
+        #[serde(default)]
+        interface: Option<String>,
     },
     Srt {
         host: String,
@@ -148,6 +152,8 @@ pub enum OutputTransport {
         stream_id: Option<String>,
         #[serde(default)]
         passphrase: Option<String>,
+        #[serde(default)]
+        interface: Option<String>,
         #[serde(default)]
         pbkeylen: Option<u8>,
         #[serde(default = "default_aac_bitrate")]
@@ -197,7 +203,6 @@ pub struct AudioMetrics {
 #[serde(rename_all = "snake_case")]
 pub enum DelayMode {
     Normal,
-    Dumped,
     Rebuilding,
     EndingDelay,
     Live,
@@ -218,6 +223,10 @@ struct DelayRuntime {
     buffered_delay_seconds: f64,
     state: DelayMode,
     last_micro_skip: Instant,
+    // While set, buffers leaving the delay queue are discarded.
+    dumping: Arc<AtomicBool>,
+    // Set after a dump so the next buffer is flagged discontinuous and the pitch element re-times its output.
+    resync: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -308,12 +317,16 @@ impl AudioEngine {
     pub fn new() -> Result<Self, EngineError> {
         let pipeline = gst::Pipeline::new();
         let configured_delay_seconds = 5;
+        let dumping = Arc::new(AtomicBool::new(false));
+        let resync = Arc::new(AtomicBool::new(false));
         let delay_state = Arc::new(Mutex::new(DelayRuntime {
             configured_delay_seconds,
             target_delay_seconds: configured_delay_seconds,
             buffered_delay_seconds: 0.0,
             state: DelayMode::Rebuilding,
             last_micro_skip: Instant::now(),
+            dumping: Arc::clone(&dumping),
+            resync: Arc::clone(&resync),
         }));
         let mixer = gst::ElementFactory::make("audiomixer")
             .name("program_mixer")
@@ -338,6 +351,22 @@ impl AudioEngine {
                 u64::from(configured_delay_seconds) * 1_000_000_000,
             )
             .build()?;
+        if let Some(queue_src) = delay_queue.static_pad("src") {
+            queue_src.add_probe(
+                gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+                move |_, info| {
+                    if dumping.load(Ordering::Relaxed) {
+                        return gst::PadProbeReturn::Drop;
+                    }
+                    if resync.swap(false, Ordering::Relaxed) {
+                        if let Some(buffer) = info.buffer_mut() {
+                            buffer.make_mut().set_flags(gst::BufferFlags::DISCONT);
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+        }
         let delay_convert = gst::ElementFactory::make("audioconvert")
             .name("delay_convert")
             .build()?;
@@ -568,9 +597,11 @@ impl AudioEngine {
                 latency_ms,
                 stream_id,
                 passphrase,
+                interface,
             } => {
+                let (host, local_address) = srt_binding(host, *mode, interface.as_deref())?;
                 let uri = srt_uri(
-                    host,
+                    &host,
                     *port,
                     *mode,
                     *latency_ms,
@@ -578,7 +609,7 @@ impl AudioEngine {
                     passphrase.as_deref(),
                     None,
                 )?;
-                build_srt_input_bin(id, &uri)?
+                build_srt_input_bin(id, &uri, local_address.as_deref())?
             }
             _ => {
                 let description = input.gst_description(id)?;
@@ -1014,31 +1045,14 @@ impl AudioEngine {
                 "DUMP is unavailable because no delay buffer exists".to_owned(),
             ));
         }
-        if !self.delay_queue.send_event(gst::event::FlushStart::new())
-            || !self
-                .delay_queue
-                .send_event(gst::event::FlushStop::new(true))
-        {
-            return Err(EngineError::Pipeline(
-                "the delay buffer could not be flushed".to_owned(),
-            ));
-        }
-        let segment = gst::FormattedSegment::<gst::ClockTime>::new();
-        if !self
-            .delay_queue
-            .send_event(gst::event::Segment::new(&segment))
-        {
-            return Err(EngineError::Pipeline(
-                "the delay stream segment could not be restarted".to_owned(),
-            ));
-        }
+        // Discarding buffers at the queue output empties the delay without flushing the pipeline;
+        // the monitor thread starts the rebuild once the queue is empty.
         self.delay_queue.set_property("min-threshold-time", 0u64);
         self.delay_pitch.set_property("tempo", 1.0f32);
+        delay.dumping.store(true, Ordering::Relaxed);
         delay.target_delay_seconds = delay.configured_delay_seconds;
         delay.last_micro_skip = Instant::now();
-        delay.buffered_delay_seconds = 0.0;
-        // Stay live until the operator presses Build delay.
-        delay.state = DelayMode::Dumped;
+        delay.state = DelayMode::Rebuilding;
         Ok(delay_status(&delay))
     }
 
@@ -1153,20 +1167,18 @@ impl InputTransport {
                 channels,
                 payload_type,
                 jitter_buffer_ms,
-                multicast_interface,
+                interface,
             } => {
                 validate_host(address)?;
                 let encoding_name = match encoding {
                     RtpEncoding::L16 => "L16",
                     RtpEncoding::L24 => "L24",
                 };
-                let interface_property = multicast_interface
-                    .as_deref()
-                    .map(|value| format!(" multicast-iface={}", gst_quote(value)))
-                    .unwrap_or_default();
+                let (bind_address, interface_property) =
+                    rtp_input_binding(address, interface.as_deref())?;
                 format!(
                     "udpsrc address={} port={port}{interface_property} caps=\"application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string){encoding_name},channels=(int){channels},payload=(int){payload_type}\" ! rtpjitterbuffer name=jitter-{} latency={jitter_buffer_ms} do-lost=true ! rtp{encoding_name}depay {standardize}",
-                    gst_quote(address),
+                    gst_quote(&bind_address),
                     id.simple()
                 )
             }
@@ -1177,6 +1189,7 @@ impl InputTransport {
                 latency_ms,
                 stream_id,
                 passphrase,
+                ..
             } => {
                 let uri = srt_uri(
                     host,
@@ -1209,13 +1222,20 @@ impl InputTransport {
     }
 }
 
-fn build_srt_input_bin(id: Uuid, uri: &str) -> Result<gst::Bin, EngineError> {
+fn build_srt_input_bin(
+    id: Uuid,
+    uri: &str,
+    local_address: Option<&str>,
+) -> Result<gst::Bin, EngineError> {
     let bin = gst::Bin::new();
     let source = gst::ElementFactory::make("srtsrc")
         .name(format!("srt-source-{}", id.simple()))
         .property("uri", uri)
         .property("wait-for-connection", false)
         .build()?;
+    if let Some(address) = local_address {
+        source.set_property("localaddress", address);
+    }
     let demux = gst::ElementFactory::make("tsdemux").build()?;
     let decoder = gst::ElementFactory::make("decodebin").build()?;
     let convert = gst::ElementFactory::make("audioconvert").build()?;
@@ -1313,14 +1333,16 @@ impl OutputTransport {
                 encoding,
                 channels,
                 payload_type,
+                interface,
             } => {
                 validate_host(host)?;
                 let (encoding_name, format) = match encoding {
                     RtpEncoding::L16 => ("L16", "S16BE"),
                     RtpEncoding::L24 => ("L24", "S24BE"),
                 };
+                let interface_property = rtp_output_binding(host, interface.as_deref())?;
                 Ok(format!(
-                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port} sync=true",
+                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port}{interface_property} sync=true",
                     gst_quote(host)
                 ))
             }
@@ -1333,9 +1355,11 @@ impl OutputTransport {
                 passphrase,
                 pbkeylen,
                 bitrate,
+                interface,
             } => {
+                let (host, local_address) = srt_binding(host, *mode, interface.as_deref())?;
                 let uri = srt_uri(
-                    host,
+                    &host,
                     *port,
                     *mode,
                     *latency_ms,
@@ -1343,8 +1367,11 @@ impl OutputTransport {
                     passphrase.as_deref(),
                     *pbkeylen,
                 )?;
+                let local_property = local_address
+                    .map(|address| format!(" localaddress={}", gst_quote(&address)))
+                    .unwrap_or_default();
                 Ok(format!(
-                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! voaacenc bitrate={bitrate} ! aacparse ! mpegtsmux ! srtsink uri={} sync=true",
+                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! voaacenc bitrate={bitrate} ! aacparse ! mpegtsmux ! srtsink uri={}{local_property} sync=true",
                     gst_quote(&uri)
                 ))
             }
@@ -1365,7 +1392,7 @@ fn validate_input(input: &InputTransport) -> Result<(), EngineError> {
             channels,
             payload_type,
             jitter_buffer_ms,
-            multicast_interface,
+            interface,
             ..
         } => {
             validate_host(address)?;
@@ -1381,14 +1408,7 @@ fn validate_input(input: &InputTransport) -> Result<(), EngineError> {
                     "RTP jitter_buffer_ms must not exceed 2000".to_owned(),
                 ));
             }
-            if multicast_interface
-                .as_deref()
-                .is_some_and(|interface| !is_safe_gst_value(interface))
-            {
-                return Err(EngineError::InvalidRequest(
-                    "multicast_interface contains unsupported characters".to_owned(),
-                ));
-            }
+            validate_interface(interface.as_deref())?;
             Ok(())
         }
         InputTransport::Srt {
@@ -1397,8 +1417,10 @@ fn validate_input(input: &InputTransport) -> Result<(), EngineError> {
             latency_ms,
             stream_id,
             passphrase,
+            interface,
             ..
         } => {
+            validate_interface(interface.as_deref())?;
             validate_host(host)?;
             validate_port(*port)?;
             validate_srt_latency(*latency_ms)?;
@@ -1440,11 +1462,13 @@ fn validate_output(output: &OutputTransport) -> Result<(), EngineError> {
             port,
             channels,
             payload_type,
+            interface,
             ..
         } => {
             validate_host(host)?;
             validate_port(*port)?;
             validate_audio_channels(*channels)?;
+            validate_interface(interface.as_deref())?;
             if *payload_type > 127 {
                 return Err(EngineError::InvalidRequest(
                     "RTP payload_type must be between 0 and 127".to_owned(),
@@ -1460,8 +1484,10 @@ fn validate_output(output: &OutputTransport) -> Result<(), EngineError> {
             passphrase,
             pbkeylen,
             bitrate,
+            interface,
             ..
         } => {
+            validate_interface(interface.as_deref())?;
             validate_host(host)?;
             validate_port(*port)?;
             validate_srt_latency(*latency_ms)?;
@@ -1560,6 +1586,15 @@ fn start_delay_monitor(queue: gst::Element, pitch: gst::Element, delay: Arc<Mute
             break;
         };
         delay.buffered_delay_seconds = buffered_ns as f64 / 1_000_000_000.0;
+        if delay.dumping.load(Ordering::Relaxed) {
+            // The delay is empty: stop discarding and refill by slowing playback.
+            if delay.buffered_delay_seconds <= 0.05 {
+                delay.dumping.store(false, Ordering::Relaxed);
+                delay.resync.store(true, Ordering::Relaxed);
+                pitch.set_property("tempo", 0.9f32);
+            }
+            continue;
+        }
         let target_seconds = f64::from(delay.target_delay_seconds);
         match delay.state {
             DelayMode::Rebuilding if delay.buffered_delay_seconds + 0.05 >= target_seconds => {
@@ -1818,6 +1853,78 @@ fn is_safe_gst_value(value: &str) -> bool {
     value
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || b"_-. :,/".contains(&byte))
+}
+
+fn validate_interface(interface: Option<&str>) -> Result<(), EngineError> {
+    match interface {
+        Some(name) if name.is_empty() || name.len() > 15 || !is_safe_gst_value(name) => Err(
+            EngineError::InvalidRequest("network interface name is not valid".to_owned()),
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn interface_ipv4(name: &str) -> Result<String, EngineError> {
+    crate::system::interface_ipv4(name).ok_or_else(|| {
+        EngineError::InvalidRequest(format!(
+            "network interface {name} was not found or has no IPv4 address"
+        ))
+    })
+}
+
+fn is_multicast_host(host: &str) -> bool {
+    host.parse::<IpAddr>()
+        .is_ok_and(|address| address.is_multicast())
+}
+
+// Returns the address to bind and any extra udpsrc properties.
+fn rtp_input_binding(
+    address: &str,
+    interface: Option<&str>,
+) -> Result<(String, String), EngineError> {
+    let Some(name) = interface.filter(|name| !name.is_empty()) else {
+        return Ok((address.to_owned(), String::new()));
+    };
+    if is_multicast_host(address) {
+        return Ok((
+            address.to_owned(),
+            format!(" multicast-iface={}", gst_quote(name)),
+        ));
+    }
+    let unspecified = address
+        .parse::<IpAddr>()
+        .is_ok_and(|address| address.is_unspecified());
+    if unspecified {
+        return Ok((interface_ipv4(name)?, String::new()));
+    }
+    Ok((address.to_owned(), String::new()))
+}
+
+fn rtp_output_binding(host: &str, interface: Option<&str>) -> Result<String, EngineError> {
+    let Some(name) = interface.filter(|name| !name.is_empty()) else {
+        return Ok(String::new());
+    };
+    let mut properties = format!(" bind-address={}", gst_quote(&interface_ipv4(name)?));
+    if is_multicast_host(host) {
+        properties.push_str(&format!(" multicast-iface={}", gst_quote(name)));
+    }
+    Ok(properties)
+}
+
+// Listener mode binds to the URI host, so the interface address replaces it; callers use localaddress.
+fn srt_binding(
+    host: &str,
+    mode: SrtMode,
+    interface: Option<&str>,
+) -> Result<(String, Option<String>), EngineError> {
+    let Some(name) = interface.filter(|name| !name.is_empty()) else {
+        return Ok((host.to_owned(), None));
+    };
+    let address = interface_ipv4(name)?;
+    match mode {
+        SrtMode::Listener => Ok((address, None)),
+        SrtMode::Caller => Ok((host.to_owned(), Some(address))),
+    }
 }
 
 fn pcm_format(bit_depth: u8, big_endian: bool) -> Result<&'static str, EngineError> {

@@ -9,8 +9,7 @@ type Props = {
 
 const STATE_LABEL: Record<DelayStatus["state"], string> = {
   normal: "Delay ready",
-  live: "Delay live",
-  dumped: "Dumped",
+  live: "Delay off",
   rebuilding: "Building",
   ending_delay: "Ending",
 };

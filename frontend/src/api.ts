@@ -63,7 +63,7 @@ export type DelayStatus = {
   configured_delay_seconds: number;
   buffered_delay_seconds: number;
   recovery_percent: number;
-  state: "normal" | "dumped" | "rebuilding" | "ending_delay" | "live";
+  state: "normal" | "rebuilding" | "ending_delay" | "live";
 };
 
 export type MonitorSource = "cue" | "program_mix" | "mix_minus" | "input";

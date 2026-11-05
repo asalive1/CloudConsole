@@ -32,6 +32,13 @@ pub fn discover() -> SystemDevices {
     }
 }
 
+pub fn interface_ipv4(name: &str) -> Option<String> {
+    network_interfaces()
+        .into_iter()
+        .find(|interface| interface.name == name)
+        .and_then(|interface| interface.addresses.into_iter().next())
+}
+
 fn network_interfaces() -> Vec<NetworkInterface> {
     let Ok(entries) = fs::read_dir("/sys/class/net") else {
         return Vec::new();
