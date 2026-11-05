@@ -1,0 +1,27 @@
+# Local-server overlay: pins every published port to a specific host NIC.
+# Combine with the base and production overlays, one Compose project per station:
+#   docker compose -p cc-<station> --env-file deploy/local/stations/<station>.env \
+#     -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.local.yml up -d --build
+# deploy/local/station.sh wraps this. Requires Docker Compose 2.24 or newer (for !override).
+#
+#   AUDIO_BIND     host IP of the audio NIC (eno3): engine audio inputs
+#   DATA_BIND      host IP of the data NIC (eno4): web UI, WebRTC media
+#   METADATA_BIND  host IP that accepts metadata connections (normally the data NIC)
+
+services:
+  audio-engine:
+    ports: !override
+      - "${AUDIO_BIND:?set AUDIO_BIND}:${ENGINE_UDP_PORTS:-5000-5049}:${ENGINE_UDP_PORTS:-5000-5049}/udp"
+      - "${METADATA_BIND:?set METADATA_BIND}:${METADATA_TCP_PORTS:-6000-6019}:${METADATA_TCP_PORTS:-6000-6019}/tcp"
+
+  janus:
+    ports: !override
+      - "${DATA_BIND:?set DATA_BIND}:${JANUS_RTP_PORT_RANGE:-11000-11099}:${JANUS_RTP_PORT_RANGE:-11000-11099}/udp"
+
+  mediamtx:
+    ports: !override
+      - "${DATA_BIND:?set DATA_BIND}:${MEDIAMTX_UDP_PORT:-12000}:${MEDIAMTX_UDP_PORT:-12000}/udp"
+
+  nginx:
+    ports: !override
+      - "${DATA_BIND:?set DATA_BIND}:${HTTP_PORT:-8080}:80"
