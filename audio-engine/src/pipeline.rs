@@ -712,14 +712,13 @@ impl AudioEngine {
             ));
         }
         self.delay_queue.set_property("min-threshold-time", 0u64);
-        self.delay_pitch.set_property("tempo", 0.95f32);
+        self.delay_pitch.set_property("tempo", 1.0f32);
         delay.target_delay_seconds = delay.configured_delay_seconds;
         delay.last_micro_skip = Instant::now();
         delay.buffered_delay_seconds = 0.0;
-        delay.state = DelayMode::Rebuilding;
-        let mut status = delay_status(&delay);
-        status.state = DelayMode::Dumped;
-        Ok(status)
+        // Stay live until the operator presses Build delay.
+        delay.state = DelayMode::Dumped;
+        Ok(delay_status(&delay))
     }
 
     pub fn build_delay(&mut self) -> Result<DelayStatus, EngineError> {
@@ -734,7 +733,7 @@ impl AudioEngine {
             ));
         }
         self.delay_queue.set_property("min-threshold-time", 0u64);
-        self.delay_pitch.set_property("tempo", 0.95f32);
+        self.delay_pitch.set_property("tempo", 0.9f32);
         delay.target_delay_seconds = target;
         delay.last_micro_skip = Instant::now();
         delay.state = DelayMode::Rebuilding;

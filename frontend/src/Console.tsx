@@ -53,6 +53,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   const sessions = usePolling<LiveSession[]>("/live-sessions", apiKey, 3000);
   const links = usePolling<GuestLink[]>("/guest-links", apiKey, 5000);
   const devices = useAudioDevices();
+  const station = usePolling<{ name: string }>("/station/config", apiKey, 30000);
 
   const [prefs, setPrefs] = useState<Prefs>(
     () => readStored<Prefs>(localStorage, PREFS_KEY) ?? { name: "Operator", inputDeviceId: "", outputDeviceId: "", active: false },
@@ -197,7 +198,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   return (
     <main className="console">
       <header className="bar">
-        <strong className="brand">Cloud Console</strong>
+        <strong className="brand">{station.data?.name || "Cloud Console"}</strong>
         <span className={`chip ${metrics.data?.pipeline_state === "playing" ? "chip-live" : ""}`}>
           {metrics.data ? metrics.data.pipeline_state : metrics.error ? "engine offline" : "…"}
         </span>
@@ -208,15 +209,13 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
         <p className="error" role="alert" onClick={() => setError("")}>{error}</p>
       )}
 
-      <div className="top-row">
-        <section className="card program-card" aria-label="Program level">
-          <span className="label">Program</span>
-          <div className="hmeter">
-            <div className="hmeter-fill" style={{ width: `${dbToPercent(programMeter ? Math.max(...programMeter) : null)}%` }} />
-          </div>
-        </section>
-        <DelayControls apiKey={apiKey} adminHref="/admin#delay" />
-      </div>
+      <section className="card program-card" aria-label="Program level">
+        <span className="label">Program</span>
+        <div className="hmeter">
+          <div className="hmeter-fill" style={{ width: `${dbToPercent(programMeter ? Math.max(...programMeter) : null)}%` }} />
+        </div>
+      </section>
+      <DelayControls apiKey={apiKey} adminHref="/admin#delay" />
 
       <section className="strips" aria-label="Input faders">
         {sources.length === 0 && <p className="muted pad">No audio inputs configured. Add one in Station admin.</p>}

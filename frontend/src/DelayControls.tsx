@@ -75,18 +75,18 @@ export default function DelayControls({ apiKey, accessToken, adminHref }: Props)
           <span className="muted"> / {target.toFixed(0)}s</span>
         </div>
         <span className={`chip chip-${state}`}>{status ? STATE_LABEL[state] : "…"}</span>
-        <div className="bar" aria-hidden="true">
+        <div className="delay-bar" aria-hidden="true">
           <div className="bar-fill" style={{ width: `${percent}%` }} />
         </div>
       </div>
       <div className="delay-actions">
-        <button type="button" className="btn btn-dump" disabled={busy || !status} onClick={() => void act("dump")}>
+        <button type="button" className="btn btn-dump" disabled={busy || !status || buffered <= 0.05} onClick={() => void act("dump")}>
           DUMP
         </button>
         <button
           type="button"
           className="btn btn-build"
-          disabled={busy || !status || state === "live" || state === "rebuilding"}
+          disabled={busy || !status || state === "rebuilding" || buffered >= target - 0.05}
           onClick={() => void act("build")}
         >
           Build delay
@@ -94,7 +94,7 @@ export default function DelayControls({ apiKey, accessToken, adminHref }: Props)
         <button
           type="button"
           className="btn"
-          disabled={busy || !status || state === "ending_delay" || (state !== "live" && buffered === 0)}
+          disabled={busy || !status || state === "ending_delay" || buffered <= 0.05}
           onClick={() => void act("end")}
         >
           End delay

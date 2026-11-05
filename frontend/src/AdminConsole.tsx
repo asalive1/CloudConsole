@@ -34,6 +34,12 @@ type FieldSpec = {
   options?: string[];
   placeholder?: string;
   help?: string;
+  source?: "nic" | "alsa";
+};
+type SystemDevices = {
+  network_interfaces: Array<{ name: string; state: string; addresses: string[] }>;
+  alsa_inputs: Array<{ device: string; name: string; description: string }>;
+  alsa_outputs: Array<{ device: string; name: string; description: string }>;
 };
 
 const TABS: Array<{ id: Tab; label: string }> = [
@@ -53,7 +59,7 @@ const CHANNELS = ["1", "2"];
 function fieldsFor(direction: "input" | "output", type: string): FieldSpec[] {
   if (type === "alsa") {
     return [
-      { key: "device", label: "ALSA device", kind: "text", placeholder: "hw:0,0" },
+      { key: "device", label: "Server ALSA device", kind: "text", placeholder: "hw:0,0", source: "alsa" },
       { key: "sample_rate", label: "Sample rate", kind: "select", options: SAMPLE_RATES },
       { key: "channels", label: "Channels", kind: "select", options: CHANNELS },
       { key: "bit_depth", label: "Bit depth", kind: "select", options: ["16", "24", "32"] },
@@ -79,7 +85,7 @@ function fieldsFor(direction: "input" | "output", type: string): FieldSpec[] {
       return [
         { key: "address", label: "Address (multicast group or bind)", kind: "text", placeholder: "239.0.0.1" },
         { key: "port", label: "Port", kind: "number", placeholder: "5004" },
-        { key: "multicast_interface", label: "Network interface", kind: "text", placeholder: "eth0" },
+        { key: "multicast_interface", label: "Network interface", kind: "text", placeholder: "eth0", source: "nic" },
         { key: "encoding", label: "Encoding", kind: "select", options: ["l24", "l16"] },
         { key: "channels", label: "Channels", kind: "select", options: CHANNELS },
         { key: "payload_type", label: "Payload type", kind: "number", placeholder: "96" },
@@ -250,6 +256,8 @@ function Endpoints({
   const items = kind === "inputs" ? all.filter((item) => (item.type ?? "aux") === scope) : all;
   const types = kind === "inputs" ? ["srt", "rtp", "alsa", "test"] : ["srt", "rtp", "alsa"];
   const metrics = usePolling<AudioMetrics>("/audio/metrics", apiKey, 2000);
+  const system = usePolling<SystemDevices>("/audio/system/devices", apiKey, 15000).data;
+  const alsaDevices = (direction === "input" ? system?.alsa_inputs : system?.alsa_outputs) ?? [];
 
   const [editing, setEditing] = useState<Resource | null>(null);
   const [name, setName] = useState("");
@@ -355,7 +363,31 @@ function Endpoints({
             {fieldsFor(direction, type).map((spec) => (
               <label key={spec.key}>
                 <span className="label">{spec.label}</span>
-                {spec.kind === "select" ? (
+                {spec.source === "nic" ? (
+                  <select value={String(values[spec.key] ?? "")} onChange={(event) => setValues({ ...values, [spec.key]: event.target.value })}>
+                    <option value="">Default (system routing)</option>
+                    {(system?.network_interfaces ?? []).map((nic) => (
+                      <option key={nic.name} value={nic.name}>{nic.name}{nic.addresses.length > 0 ? ` — ${nic.addresses.join(", ")}` : ""} ({nic.state})</option>
+                    ))}
+                    {Boolean(values[spec.key]) && !(system?.network_interfaces ?? []).some((nic) => nic.name === values[spec.key]) && (
+                      <option value={String(values[spec.key])}>{String(values[spec.key])}</option>
+                    )}
+                  </select>
+                ) : spec.source === "alsa" ? (
+                  <>
+                    <input
+                      list={`alsa-${direction}`}
+                      value={String(values[spec.key] ?? "")}
+                      placeholder={alsaDevices.length > 0 ? "Choose a detected device" : spec.placeholder}
+                      autoComplete="off"
+                      onChange={(event) => setValues({ ...values, [spec.key]: event.target.value })}
+                    />
+                    <datalist id={`alsa-${direction}`}>
+                      {alsaDevices.map((device) => <option key={device.device} value={device.device}>{device.name} {device.description}</option>)}
+                    </datalist>
+                    {system && alsaDevices.length === 0 && <span className="small muted">No ALSA {direction} devices detected on the server; enter one manually.</span>}
+                  </>
+                ) : spec.kind === "select" ? (
                   <select value={String(values[spec.key] ?? "")} onChange={(event) => setValues({ ...values, [spec.key]: event.target.value })}>
                     {spec.options?.map((option) => <option key={option} value={option}>{option || "None"}</option>)}
                   </select>

@@ -38,7 +38,8 @@ a { color: var(--blue); }
 .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 .label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 2px; }
 
-.bar { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.bar { display: flex; align-items: center; gap: 8px; justify-content: space-between; min-height: 34px; flex-wrap: nowrap; }
+.bar .brand { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .brand { font-size: 15px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 4px 0; }
@@ -89,10 +90,10 @@ input[type="range"] { width: 100%; }
 .hmeter, .bar-fill-wrap { height: 14px; background: #0b0d10; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); }
 .hmeter-fill { height: 100%; background: linear-gradient(90deg, var(--green) 70%, var(--amber) 85%, var(--red)); transition: width 80ms linear; }
 
-.delay-card { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.delay-card { padding: 5px 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
 .delay-readout { flex: 1 1 160px; display: grid; gap: 4px; }
-.delay-value { font-size: 24px; font-variant-numeric: tabular-nums; }
-.bar { height: 6px; background: #0b0d10; border-radius: 3px; overflow: hidden; }
+.delay-value { font-size: 18px; font-variant-numeric: tabular-nums; }
+.delay-bar { height: 6px; background: #0b0d10; border-radius: 3px; overflow: hidden; }
 .bar-fill { height: 100%; background: var(--blue); transition: width 300ms linear; }
 .delay-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .link-small { font-size: 12px; }

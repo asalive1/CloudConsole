@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 mod pipeline;
+mod system;
 
 use pipeline::{AudioEngine, AudioMetrics, DelayStatus, EngineError};
 
@@ -131,6 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(health))
         .route("/ready", get(health))
         .route("/metrics", get(metrics))
+        .route("/system/devices", get(system_devices))
         .route("/delay", get(delay_status))
         .route("/delay/config", patch(configure_delay))
         .route("/delay/dump", post(dump_delay))
@@ -160,6 +162,13 @@ async fn health() -> Json<HealthResponse> {
         status: "ok",
         gstreamer_version: gst::version_string().to_string(),
     })
+}
+
+async fn system_devices() -> Result<Json<system::SystemDevices>, ApiError> {
+    tokio::task::spawn_blocking(system::discover)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::Pipeline(error.to_string()))
 }
 
 async fn metrics(State(state): State<AppState>) -> Result<Json<AudioMetrics>, ApiError> {
