@@ -17,7 +17,7 @@ use uuid::Uuid;
 mod pipeline;
 mod system;
 
-use pipeline::{AudioEngine, AudioMetrics, DelayStatus, EngineError};
+use pipeline::{AudioEngine, AudioMetrics, BridgeConfig, BridgeStatus, DelayStatus, EngineError};
 
 #[derive(Clone)]
 struct AppState {
@@ -133,6 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ready", get(health))
         .route("/metrics", get(metrics))
         .route("/system/devices", get(system_devices))
+        .route(
+            "/bridge",
+            get(bridge_status).put(start_bridge).delete(stop_bridge),
+        )
         .route("/delay", get(delay_status))
         .route("/delay/config", patch(configure_delay))
         .route("/delay/dump", post(dump_delay))
@@ -169,6 +173,22 @@ async fn system_devices() -> Result<Json<system::SystemDevices>, ApiError> {
         .await
         .map(Json)
         .map_err(|error| ApiError::Pipeline(error.to_string()))
+}
+
+async fn bridge_status(State(state): State<AppState>) -> Json<BridgeStatus> {
+    Json(state.engine.lock().await.bridge_status())
+}
+
+async fn start_bridge(
+    State(state): State<AppState>,
+    Json(config): Json<BridgeConfig>,
+) -> Result<Json<BridgeStatus>, ApiError> {
+    Ok(Json(state.engine.lock().await.start_bridge(config)?))
+}
+
+async fn stop_bridge(State(state): State<AppState>) -> StatusCode {
+    state.engine.lock().await.stop_bridge();
+    StatusCode::NO_CONTENT
 }
 
 async fn metrics(State(state): State<AppState>) -> Result<Json<AudioMetrics>, ApiError> {

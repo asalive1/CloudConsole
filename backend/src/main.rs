@@ -7,6 +7,7 @@ use tokio::sync::{broadcast, Mutex};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod bridge;
 mod engine_sync;
 mod janus;
 mod routes;
@@ -118,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     routes::restore_delay_settings(&state).await?;
     tokio::spawn(engine_sync::run(state.clone()));
+    tokio::spawn(bridge::run(state.clone()));
     let app = Router::new()
         .route("/api/health", get(routes::health))
         .route("/api/ready", get(routes::ready))
