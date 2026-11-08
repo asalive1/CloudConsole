@@ -60,7 +60,7 @@ export default function DelayControls({ apiKey, accessToken }: Props) {
   }
 
   const target = status?.configured_delay_seconds ?? 0;
-  const buffered = status?.buffered_delay_seconds ?? 0;
+  const buffered = status?.state === "live" ? 0 : (status?.buffered_delay_seconds ?? 0);
   const percent = target > 0 ? Math.min(100, (buffered / target) * 100) : 0;
   const state = status?.state ?? "normal";
 

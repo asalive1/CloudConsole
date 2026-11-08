@@ -1114,6 +1114,11 @@ impl AudioEngine {
             .lock()
             .map_err(|_| EngineError::Pipeline("delay state lock is poisoned".to_owned()))?;
         delay.configured_delay_seconds = delay_seconds;
+        if delay.state == DelayMode::Live
+            || (delay.state == DelayMode::EndingDelay && delay.target_delay_seconds == 0)
+        {
+            return Ok(delay_status(&delay));
+        }
         delay.target_delay_seconds = delay_seconds;
         delay.last_micro_skip = Instant::now();
         let target = f64::from(delay_seconds);
@@ -1141,7 +1146,7 @@ impl AudioEngine {
             .delay_state
             .lock()
             .map_err(|_| EngineError::Pipeline("delay state lock is poisoned".to_owned()))?;
-        if delay.buffered_delay_seconds <= 0.05 {
+        if delay.state == DelayMode::Live || delay.buffered_delay_seconds <= 0.05 {
             return Err(EngineError::Conflict(
                 "DUMP is unavailable because no delay buffer exists".to_owned(),
             ));
@@ -1205,16 +1210,26 @@ impl AudioEngine {
             .delay_state
             .lock()
             .map_err(|_| EngineError::Pipeline("delay state lock is poisoned".to_owned()))?;
-        if delay.buffered_delay_seconds <= 0.05 {
+        let dumping = delay.dumping.load(Ordering::Relaxed);
+        if delay.state == DelayMode::Live || (delay.buffered_delay_seconds <= 0.05 && !dumping) {
             return Err(EngineError::Conflict(
                 "End Delay is unavailable because no delay buffer exists".to_owned(),
             ));
         }
         self.delay_queue.set_property("min-threshold-time", 0u64);
-        self.delay_pitch.set_property("tempo", 1.05f32);
         delay.target_delay_seconds = 0;
         delay.last_micro_skip = Instant::now();
-        delay.state = DelayMode::EndingDelay;
+        if dumping {
+            delay.dumping.store(false, Ordering::Relaxed);
+            delay.resync.store(true, Ordering::Relaxed);
+        }
+        if delay.buffered_delay_seconds <= 0.05 {
+            self.delay_pitch.set_property("tempo", 1.0f32);
+            delay.state = DelayMode::Live;
+        } else {
+            self.delay_pitch.set_property("tempo", 1.05f32);
+            delay.state = DelayMode::EndingDelay;
+        }
         Ok(delay_status(&delay))
     }
 
@@ -1670,15 +1685,20 @@ fn is_silent_pcm(pcm: &[u8]) -> bool {
 }
 
 fn delay_status(delay: &DelayRuntime) -> DelayStatus {
+    let buffered_delay_seconds = if delay.state == DelayMode::Live {
+        0.0
+    } else {
+        delay.buffered_delay_seconds
+    };
     let recovery_percent = if delay.configured_delay_seconds == 0 {
         0.0
     } else {
-        (delay.buffered_delay_seconds / f64::from(delay.configured_delay_seconds) * 100.0)
+        (buffered_delay_seconds / f64::from(delay.configured_delay_seconds) * 100.0)
             .clamp(0.0, 100.0)
     };
     DelayStatus {
         configured_delay_seconds: delay.configured_delay_seconds,
-        buffered_delay_seconds: delay.buffered_delay_seconds,
+        buffered_delay_seconds,
         recovery_percent,
         state: delay.state,
     }
@@ -2172,6 +2192,26 @@ fn default_aac_bitrate() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_delay_status_ignores_transient_queue_levels() {
+        let mut delay = DelayRuntime {
+            configured_delay_seconds: 10,
+            target_delay_seconds: 0,
+            buffered_delay_seconds: 0.12,
+            state: DelayMode::Live,
+            last_micro_skip: Instant::now(),
+            dumping: Arc::new(AtomicBool::new(false)),
+            resync: Arc::new(AtomicBool::new(false)),
+        };
+        let status = delay_status(&delay);
+        assert_eq!(status.buffered_delay_seconds, 0.0);
+        assert_eq!(status.recovery_percent, 0.0);
+        delay.state = DelayMode::Rebuilding;
+        let status = delay_status(&delay);
+        assert_eq!(status.buffered_delay_seconds, 0.12);
+        assert!((status.recovery_percent - 1.2).abs() < 1e-10);
+    }
 
     #[test]
     fn srt_uris_apply_role_defaults_and_encode_secrets() {

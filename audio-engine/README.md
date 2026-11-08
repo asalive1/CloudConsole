@@ -32,6 +32,10 @@ At most one Automation and five AUX source pipelines may be active. A source may
 
 The Program bus has a null sink in addition to configured outputs so the pipeline can initialize without a physical sound device. `GET /api/audio/metrics` reports GStreamer pipeline state, source/output counts, levels, RTP jitter-buffer statistics, and pipeline latency when available.
 
+## Program delay
+
+End gradually drains the delay and leaves it off until Build is pressed. Changing the configured delay while it is off or ending does not restart it. Dump clears the buffered audio and automatically rebuilds the delay; End can cancel that rebuild.
+
 ## Validation notes
 
 Linux container tests use `audiotestsrc` and `fakesink`. SRT AAC/MPEG-TS input and output were verified container-to-container. Compose publishes UDP `5000-5049` for RTP inputs and SRT listener inputs (override with `ENGINE_UDP_PORTS`, e.g. `ENGINE_UDP_PORTS=5000-5099`); configure inputs on ports within that range. External reachability still depends on host firewall and network configuration. Real ALSA hardware playback requires a Linux host/device. WebRTC signaling and participant connections are Phase 4.
