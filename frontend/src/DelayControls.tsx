@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { apiRequest, errorMessage, type DelayStatus } from "./api";
 
 type Props = {
@@ -68,33 +68,42 @@ export default function DelayControls({ apiKey, accessToken }: Props) {
 
   return (
     <div className={`strip delay-strip state-${state}`} aria-label="Profanity delay">
-      <span className="strip-name delay-value" title="Delay buffer / target">
-        {buffered.toFixed(1)}s<span className="muted">/{target.toFixed(0)}s</span>
-      </span>
-      <span className={`chip chip-${state}`}>{status ? STATE_LABEL[state] : "…"}</span>
+      <div className="delay-readout">
+        <span className="strip-name delay-value" title="Delay buffer / target">
+          {buffered.toFixed(1)}s<span className="muted">/{target.toFixed(0)}s</span>
+        </span>
+        <span className={`chip chip-${state}`}>{status ? STATE_LABEL[state] : "…"}</span>
+      </div>
       <div className="strip-body delay-body">
-        <div className="vbar" aria-hidden="true">
-          <div className="vbar-fill" style={{ height: `${percent}%` }} />
+        <div className="vbar" aria-hidden="true" style={{ "--delay-fill": `${percent}%` } as CSSProperties}>
+          <div className="vbar-fill" />
         </div>
-        <button type="button" className="btn btn-dump" disabled={busy || !status || buffered <= 0.05} onClick={() => void act("dump")}>
-          DUMP
-        </button>
+        <div className="delay-actions">
+          <button
+            type="button"
+            className="btn btn-small btn-build"
+            disabled={busy || !status || state === "rebuilding" || buffered >= target - 0.05}
+            onClick={() => void act("build")}
+          >
+            Build
+          </button>
+          <button
+            type="button"
+            className="btn btn-small"
+            disabled={busy || !status || state === "ending_delay" || buffered <= 0.05}
+            onClick={() => void act("end")}
+          >
+            End
+          </button>
+        </div>
       </div>
       <button
         type="button"
-        className="btn btn-small btn-build"
-        disabled={busy || !status || state === "rebuilding" || buffered >= target - 0.05}
-        onClick={() => void act("build")}
+        className="btn btn-dump"
+        disabled={busy || !status || buffered <= 0.05}
+        onClick={() => void act("dump")}
       >
-        Build
-      </button>
-      <button
-        type="button"
-        className="btn btn-small"
-        disabled={busy || !status || state === "ending_delay" || buffered <= 0.05}
-        onClick={() => void act("end")}
-      >
-        End
+        DUMP
       </button>
       {error && <span className="small error" role="alert" title={error}>!</span>}
     </div>

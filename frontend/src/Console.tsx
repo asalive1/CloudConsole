@@ -244,19 +244,21 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
           <div className="hmeter-fill" style={{ width: `${dbToPercent(programMeter ? Math.max(...programMeter) : null)}%` }} />
         </div>
       </section>
-      <section className="strips" aria-label="Input faders">
+      <div className="live-inputs">
         <DelayControls apiKey={apiKey} />
-        {sources.length === 0 && <p className="muted pad">No audio inputs configured. Add one in Station admin.</p>}
-        {sources.map((channel) => (
-          <Strip
-            key={channel.channel_id}
-            channel={channel}
-            peak={metricFor(channel.channel_id)?.peak_dbfs}
-            state={metricFor(channel.channel_id)?.state}
-            onChange={(body) => void patchChannel(channel.channel_id, body)}
-          />
-        ))}
-      </section>
+        <section className="strips" aria-label="Input faders">
+          {sources.length === 0 && <p className="muted pad">No audio inputs configured. Add one in Station admin.</p>}
+          {sources.map((channel) => (
+            <Strip
+              key={channel.channel_id}
+              channel={channel}
+              peak={metricFor(channel.channel_id)?.peak_dbfs}
+              state={metricFor(channel.channel_id)?.state}
+              onChange={(body) => void patchChannel(channel.channel_id, body)}
+            />
+          ))}
+        </section>
+      </div>
 
       <section className="card mics" aria-label="Connected microphones">
         {pending.map((guest) => (

@@ -92,15 +92,12 @@ input[type="range"] { width: 100%; }
 .hmeter, .bar-fill-wrap { height: 14px; background: #0b0d10; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); }
 .hmeter-fill { height: 100%; background: linear-gradient(90deg, var(--green) 70%, var(--amber) 85%, var(--red)); transition: width 80ms linear; }
 
-.delay-card { padding: 5px 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
-.delay-readout { flex: 1 1 160px; display: grid; gap: 4px; }
 .delay-value { font-size: 18px; font-variant-numeric: tabular-nums; }
-.delay-bar { height: 6px; background: #0b0d10; border-radius: 3px; overflow: hidden; }
-.bar-fill { height: 100%; background: var(--blue); transition: width 300ms linear; }
-.delay-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .link-small { font-size: 12px; }
 .state-dumped { border-color: var(--red); }
 
+.live-inputs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; align-items: start; }
+.live-inputs:has(> .delay-strip) { grid-template-columns: 84px minmax(0, 1fr); }
 .strips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
 .strips.inner { margin-top: 4px; }
 .strip {
@@ -145,12 +142,15 @@ th { color: var(--muted); font-weight: 500; }
 .my-mic { display: flex; align-items: center; gap: 8px; min-height: 26px; }
 .my-mic-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card:has(> .my-mic) { padding: 3px 8px; }
+.delay-readout { display: flex; flex-direction: column; gap: 3px; }
 .delay-strip .delay-value { font-size: 13px; font-variant-numeric: tabular-nums; overflow: visible; }
 .delay-strip .chip { align-self: center; padding: 0 6px; }
 .delay-body { align-items: stretch; }
-.delay-body .btn-dump { flex: 1; min-width: 0; padding: 2px; font-size: 13px; letter-spacing: 0; writing-mode: vertical-rl; transform: rotate(180deg); }
+.delay-actions { display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 3px; min-width: 0; }
+.delay-actions .btn { padding: 3px 2px; }
+.delay-strip .btn-dump { min-height: 45px; padding: 2px; font-size: 13px; letter-spacing: 0; }
 .vbar { width: 8px; background: #0b0d10; border-radius: 3px; display: flex; align-items: flex-end; overflow: hidden; border: 1px solid var(--line); }
-.vbar-fill { width: 100%; background: var(--blue); transition: height 300ms linear; }
+.vbar-fill { width: 100%; height: var(--delay-fill); background: var(--blue); transition: height 300ms linear, width 300ms linear; }
 .strips { align-items: flex-start; }
 
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
@@ -161,9 +161,27 @@ th { color: var(--muted); font-weight: 500; }
 
 @container (max-width: 420px) {
   .top-row, .grid2 { grid-template-columns: 1fr; }
+  .live-inputs:has(> .delay-strip) { grid-template-columns: 72px minmax(0, 1fr); }
   .strip { flex-basis: 72px; }
   .delay-value { font-size: 20px; }
   .btn-dump { padding: 8px 14px; font-size: 16px; }
+}
+@container (min-width: 320px) {
+  .live-inputs:has(> .delay-strip) { grid-template-columns: minmax(0, 1fr); }
+  .delay-strip {
+    width: 100%;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 6px;
+  }
+  .delay-body { height: auto; min-width: 0; flex-direction: column; gap: 4px; }
+  .delay-actions { flex-direction: row; }
+  .delay-actions .btn { flex: 1; }
+  .delay-strip .btn-dump { min-height: 42px; padding: 4px 10px; }
+  .vbar { width: 100%; height: 8px; align-items: stretch; }
+  .vbar-fill { width: var(--delay-fill); height: 100%; }
 }
 @container (min-width: 800px) {
   .strip { flex-basis: 96px; }
