@@ -191,7 +191,10 @@ mod tests {
             ["hw:0,0", "hw:0,1", "hw:4,0"]
         );
         assert_eq!(
-            outputs.iter().map(|d| d.device.as_str()).collect::<Vec<_>>(),
+            outputs
+                .iter()
+                .map(|d| d.device.as_str())
+                .collect::<Vec<_>>(),
             ["hw:0,0", "hw:0,1", "hw:4,0"]
         );
     }
