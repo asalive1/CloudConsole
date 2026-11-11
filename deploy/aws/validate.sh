@@ -59,7 +59,7 @@ first="${janus_id:+$(get JANUS_RTP_PORT_RANGE | cut -d- -f1)}"
 check docker port "$janus_id" "${first}/udp"
 
 domain="$(get STATION_DOMAIN)"
-if [ -f "$root/deploy/aws/edge/conf.d/$name.conf" ] && grep -q 'listen 443' "$root/deploy/aws/edge/conf.d/$name.conf"; then
+if [ -f "$root/deploy/aws/edge/conf.d/$name.conf" ] && grep -q 'listen 7001 ssl' "$root/deploy/aws/edge/conf.d/$name.conf"; then
     DESC="HTTPS answers at https://$domain/api/health"
     check curl -fsS "https://$domain/api/health"
 else

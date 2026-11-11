@@ -51,11 +51,11 @@ WHIP_WHEP_PASSWORD=$(secret 16)
 JANUS_PUBLIC_ADDRESS=$public_ip
 STUN_SERVER=stun:stun.l.google.com:19302
 HTTP_BIND=127.0.0.1
-HTTP_PORT=$((8080 + slot))
-ENGINE_UDP_PORTS=$((5000 + slot * 50))-$((5049 + slot * 50))
-METADATA_TCP_PORTS=$((6000 + slot * 20))-$((6019 + slot * 20))
-JANUS_RTP_PORT_RANGE=$((11000 + slot * 100))-$((11099 + slot * 100))
-MEDIAMTX_UDP_PORT=$((12000 + slot))
+HTTP_PORT=$((7002 + slot))
+ENGINE_UDP_PORTS=$((7010 + slot * 100))-$((7019 + slot * 100))
+METADATA_TCP_PORTS=$((7010 + slot * 100))-$((7019 + slot * 100))
+JANUS_RTP_PORT_RANGE=$((7020 + slot * 100))-$((7099 + slot * 100))
+MEDIAMTX_UDP_PORT=$((7100 + slot * 100))
 EOF
 umask 022
 
@@ -66,10 +66,10 @@ grep '^STATION_API_KEY=' "$env_file" | cut -d= -f2
 cat <<EOF
 
 Security group ports for this station (inbound):
-  UDP $((11000 + slot * 100))-$((11099 + slot * 100))   browser microphone media (Janus)
-  UDP $((12000 + slot))               WHIP/WHEP media
-  UDP $((5000 + slot * 50))-$((5049 + slot * 50))   RTP/SRT audio inputs from your automation system (restrict to its address)
-  TCP $((6000 + slot * 20))-$((6019 + slot * 20))   metadata server ports (restrict to its address)
+  UDP $((7020 + slot * 100))-$((7099 + slot * 100))   browser microphone media (Janus)
+  UDP $((7100 + slot * 100))                WHIP/WHEP media
+  UDP $((7010 + slot * 100))-$((7019 + slot * 100))   RTP/SRT audio inputs from your automation system (restrict to its address)
+  TCP $((7010 + slot * 100))-$((7019 + slot * 100))   metadata server ports (restrict to its address)
 
 Next: deploy/aws/station.sh $name up, then deploy/aws/issue-cert.sh $name
 EOF

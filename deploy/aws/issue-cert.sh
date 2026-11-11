@@ -2,7 +2,7 @@
 # Starts the shared TLS edge proxy if needed, obtains a Let's Encrypt certificate for the
 # station's domain, and switches its edge configuration to HTTPS.
 # Usage: CERTBOT_EMAIL=ops@example.com issue-cert.sh <name>
-# The domain must already resolve to this instance and TCP 80 and 443 must be open.
+# Forward public TCP 80 to the edge's TCP 7000 and public TCP 443 to TCP 7001.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
@@ -22,6 +22,8 @@ http_port="$(grep '^HTTP_PORT=' "$env_file" | cut -d= -f2)"
 edge_compose=(docker compose -p cc-edge -f "$edge/docker-compose.yml")
 mkdir -p "$edge/webroot" "$edge/conf.d"
 "${edge_compose[@]}" up -d nginx
+"${edge_compose[@]}" exec -T nginx nginx -t
+"${edge_compose[@]}" exec -T nginx nginx -s reload
 "${edge_compose[@]}" run --rm --entrypoint certbot certbot certonly --webroot -w /var/www/certbot \
     -d "$domain" --email "$CERTBOT_EMAIL" --agree-tos --no-eff-email --non-interactive
 

@@ -38,4 +38,4 @@ End gradually drains the delay and leaves it off until Build is pressed. Changin
 
 ## Validation notes
 
-Linux container tests use `audiotestsrc` and `fakesink`. SRT AAC/MPEG-TS input and output were verified container-to-container. Compose publishes UDP `5000-5049` for RTP inputs and SRT listener inputs (override with `ENGINE_UDP_PORTS`, e.g. `ENGINE_UDP_PORTS=5000-5099`); configure inputs on ports within that range. External reachability still depends on host firewall and network configuration. Real ALSA hardware playback requires a Linux host/device. WebRTC signaling and participant connections are Phase 4.
+Linux container tests use `audiotestsrc` and `fakesink`. SRT AAC/MPEG-TS input and output were verified container-to-container. Compose publishes UDP `7010-7019` by default for RTP inputs and SRT listener inputs (override with `ENGINE_UDP_PORTS`); configure inputs on ports within the station's range. External reachability still depends on host firewall and network configuration. Real ALSA hardware playback requires a Linux host/device. WebRTC signaling and participant connections are Phase 4.

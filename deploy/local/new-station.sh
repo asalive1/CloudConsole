@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Creates the configuration for one station on the local server.
 # Usage: new-station.sh                      (asks questions)
-#        new-station.sh <name> <slot 0-9> [janus-address]
+#        new-station.sh <name> <slot 0-3> [janus-address]
 #   name           lowercase letters, digits and dashes; becomes the Compose project cc-<name>
-#   slot           0-9; selects a non-overlapping port block
+#   slot           0-3; selects a non-overlapping port block
 #   janus-address  address browsers use for WebRTC media (default: the data NIC address)
 # Override the NIC addresses with AUDIO_IP and DATA_IP in the environment.
 set -euo pipefail
@@ -23,7 +23,11 @@ if [ "$#" -eq 0 ]; then
     used=$(grep -h '^STATION_SLOT=' "$dir"/*.env 2>/dev/null | cut -d= -f2 | tr '\n' ' ' || true)
     next=0
     while [[ " $used " == *" $next "* ]]; do next=$((next + 1)); done
-    read -r -p "Slot number 0-9 (gives this station its own ports) [$next]: " slot
+    if [ "$next" -gt 3 ]; then
+        echo "all station slots 0-3 are already in use" >&2
+        exit 1
+    fi
+    read -r -p "Slot number 0-3 (gives this station its own ports) [$next]: " slot
     slot=${slot:-$next}
     read -r -p "Address browsers use for microphone audio [$data_ip]: " janus_ip
     janus_ip=${janus_ip:-$data_ip}
@@ -36,7 +40,7 @@ name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
 env_file="$dir/$name.env"
 
 [[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || { echo "invalid station name: $name" >&2; exit 2; }
-[[ "$slot" =~ ^[0-9]$ ]] || { echo "slot must be 0-9" >&2; exit 2; }
+[[ "$slot" =~ ^[0-3]$ ]] || { echo "slot must be 0-3" >&2; exit 2; }
 [ ! -e "$env_file" ] || { echo "$env_file already exists" >&2; exit 1; }
 for other in "$dir"/*.env; do
     [ -e "$other" ] || continue
@@ -65,11 +69,11 @@ DATA_BIND=$data_ip
 METADATA_BIND=$data_ip
 JANUS_PUBLIC_ADDRESS=$janus_ip
 STUN_SERVER=stun:stun.l.google.com:19302
-HTTP_PORT=$((8080 + slot))
-ENGINE_UDP_PORTS=$((5000 + slot * 50))-$((5049 + slot * 50))
-METADATA_TCP_PORTS=$((6000 + slot * 20))-$((6019 + slot * 20))
-JANUS_RTP_PORT_RANGE=$((11000 + slot * 100))-$((11099 + slot * 100))
-MEDIAMTX_UDP_PORT=$((12000 + slot))
+HTTP_PORT=$((7002 + slot))
+ENGINE_UDP_PORTS=$((7010 + slot * 100))-$((7019 + slot * 100))
+METADATA_TCP_PORTS=$((7010 + slot * 100))-$((7019 + slot * 100))
+JANUS_RTP_PORT_RANGE=$((7020 + slot * 100))-$((7099 + slot * 100))
+MEDIAMTX_UDP_PORT=$((7100 + slot * 100))
 EOF
 umask 022
 
@@ -78,11 +82,11 @@ grep '^STATION_API_KEY=' "$env_file" | cut -d= -f2
 cat <<EOF
 
 Ports for station '$name' (slot $slot):
-  TCP $((8080 + slot))   on $data_ip      web UI (point Nginx Proxy Manager here)
-  UDP $((5000 + slot * 50))-$((5049 + slot * 50))   on $audio_ip   SRT/RTP audio inputs
-  TCP $((6000 + slot * 20))-$((6019 + slot * 20))   on $data_ip      metadata
-  UDP $((11000 + slot * 100))-$((11099 + slot * 100))  on $data_ip      browser microphone media (Janus)
-  UDP $((12000 + slot))   on $data_ip      WHIP/WHEP media
+  TCP $((7002 + slot))   on $data_ip      web UI (point Nginx Proxy Manager here)
+  UDP $((7010 + slot * 100))-$((7019 + slot * 100))   on $audio_ip   SRT/RTP audio inputs
+  TCP $((7010 + slot * 100))-$((7019 + slot * 100))   on $data_ip      metadata
+  UDP $((7020 + slot * 100))-$((7099 + slot * 100))   on $data_ip      browser microphone media (Janus)
+  UDP $((7100 + slot * 100))   on $data_ip      WHIP/WHEP media
 
 Next: deploy/local/station.sh $name up
 EOF

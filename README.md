@@ -7,7 +7,7 @@ Cloud Console is a browser-based broadcast console for station operators, hosts,
 The audio engine relays metadata (XML, ASCII, RDS, HD Radio, custom) as raw TCP bytes.
 Each direction supports a server or client role and a chosen network interface; outputs
 can be held back by the live Program delay. Configure it in Station Administration.
-Published TCP ports: `METADATA_TCP_PORTS` (default 6000-6019).
+Published TCP ports: `METADATA_TCP_PORTS` (default 7010-7019).
 
 ## Production deployment
 
@@ -22,7 +22,7 @@ Copy-Item .env.example .env
 docker compose up --build -d
 ```
 
-Open [http://localhost:8080](http://localhost:8080). The API health check is available at `/api/health`, and the OpenAPI document is at `/api/openapi.json`.
+Open [http://localhost:7002](http://localhost:7002). The API health check is available at `/api/health`, and the OpenAPI document is at `/api/openapi.json`.
 
 The Compose defaults are for local development only. Replace `STATION_API_KEY`, `GUEST_JWT_SECRET`, `JANUS_ROOM_PIN`, and the WHIP/WHEP credentials in `.env` before using any non-local deployment. Do not commit `.env`.
 
@@ -47,11 +47,11 @@ The source-control ignore rules exclude `BuildPrompts/`; the prompt documents re
 
 Phase 1 establishes the build, container, CI, and development conventions. Phase 2 provides station-scoped PostgreSQL migrations, direct station API-key validation, guest-link session exchange, health, configuration, and user endpoints. Phase 3 adds a separate GStreamer service with configurable RTP, SRT, and ALSA sources; Program bus output routing; pipeline recovery; and audio telemetry. Phase 4 adds Janus VideoRoom audio-only connections for hosts, co-hosts, and approved guests, persisted connection state, approval/rejection, and reconnect support. MediaMTX exposes separate WHIP publish and WHEP read endpoints for external streams.
 
-The audio engine is internal to the Compose network. Station-authenticated engine requests are proxied through `/api/audio/*`. For example, an RTP Automation source defaults to stereo L24 on UDP port 5005; the source and output transports are configurable through the audio API. The SRT program output defaults to caller mode with AAC in MPEG-TS, while SRT inputs default to listener mode. ALSA outputs support 48 kHz at 16- or 24-bit depth. Physical ALSA devices are not available in the Windows/Docker Desktop validation environment; configure a Linux ALSA device for hardware playback.
+The audio engine is internal to the Compose network. Station-authenticated engine requests are proxied through `/api/audio/*`. Configure RTP and SRT listener inputs to use a port in the station's published audio range; the generic input defaults are not automatically adjusted to the station slot. The SRT program output defaults to caller mode with AAC in MPEG-TS, while SRT inputs default to listener mode. ALSA outputs support 48 kHz at 16- or 24-bit depth. Physical ALSA devices are not available in the Windows/Docker Desktop validation environment; configure a Linux ALSA device for hardware playback.
 
 ## Phase 4 media configuration
 
-Janus signaling is proxied at `/janus`; its WebRTC media range is UDP `11000-11099` (about two ports per connected microphone per room). When testing on a single machine, set `JANUS_PUBLIC_ADDRESS=127.0.0.1` so browsers receive a reachable ICE candidate. MediaMTX provides WHIP and WHEP at `/media/<stream-name>/whip` and `/media/<stream-name>/whep`, with WebRTC media on UDP `12000`. Both media services need inbound UDP reachability on their published ports for direct ICE connectivity.
+Janus signaling is proxied at `/janus`; the default WebRTC media range is UDP `7020-7099`. Each browser joins both Program and Cue rooms; plan for roughly two UDP ports per connection per room, plus headroom. Ten simultaneous microphone/guest users therefore need approximately 40 ports, but actual usage depends on ICE candidates and should be load-tested. When testing on a single machine, set `JANUS_PUBLIC_ADDRESS=127.0.0.1` so browsers receive a reachable ICE candidate. MediaMTX provides WHIP and WHEP at `/media/<stream-name>/whip` and `/media/<stream-name>/whep`, with WebRTC media on UDP `7100`. Both media services need inbound UDP reachability on their published ports for direct ICE connectivity.
 
 Set `JANUS_PUBLIC_ADDRESS` to the public IP address when the host is behind 1:1 NAT. Configure `STUN_SERVER` and, where restrictive NAT or firewalls require relaying, `TURN_SERVER_URL`, `TURN_SERVER_USERNAME`, and `TURN_SERVER_CREDENTIAL`. MediaMTX stream endpoints use HTTP Basic authentication from `WHIP_WHEP_USERNAME` and `WHIP_WHEP_PASSWORD`. Janus WebSocket upgrades are authorized against the participant JWT before NGINX forwards the connection.
 

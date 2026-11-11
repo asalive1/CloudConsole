@@ -1,6 +1,6 @@
 # Written by new-station.sh. Serves the ACME challenge until issue-cert.sh adds TLS.
 server {
-    listen 80;
+    listen 7000;
     server_name @DOMAIN@;
 
     location /.well-known/acme-challenge/ {

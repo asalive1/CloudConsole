@@ -70,8 +70,8 @@ cd /opt/CloudConsole
 It asks:
 
 1. **Station name**: for example `andy`.
-2. **Slot (0-9)**: it suggests the next free one. Each station needs a different slot,
-   because the slot decides the ports (slot 0 = web port 8080, slot 1 = 8081, and so on).
+2. **Slot (0-3)**: it suggests the next free one. Each station needs a different slot,
+   because the slot decides the ports (slot 0 = web port 7002, slot 1 = 7003, and so on).
 3. **Address browsers use for microphone audio**: press Enter for 192.168.50.207. Enter your
    public IP instead only if guests connect from the internet.
 
@@ -84,7 +84,7 @@ and the list of ports. Copy the key somewhere safe. You can see it again any tim
 ```bash
 ./deploy/local/station.sh andy up      # first time: builds everything, be patient
 ./deploy/local/station.sh andy ps      # every service should say "running" / "healthy"
-curl -I http://192.168.50.207:8080/api/health     # expect HTTP 200 (use your slot's port)
+curl -I http://192.168.50.207:7002/api/health     # expect HTTP 200 (use your slot's port)
 ```
 
 ### Step 5. Add it to Nginx Proxy Manager
@@ -125,11 +125,10 @@ Give each station its own name and slot. Slots never overlap:
 
 | Slot | Web (TCP, eno4) | Audio in (UDP, eno3) | Metadata (TCP, eno4) | Mic media (UDP, eno4) | WHIP/WHEP (UDP, eno4) |
 |---|---|---|---|---|---|
-| 0 | 8080 | 5000-5049 | 6000-6019 | 11000-11099 | 12000 |
-| 1 | 8081 | 5050-5099 | 6020-6039 | 11100-11199 | 12001 |
-| 2 | 8082 | 5100-5149 | 6040-6059 | 11200-11299 | 12002 |
-| 3 | 8083 | 5150-5199 | 6060-6079 | 11300-11399 | 12003 |
-| N | 8080+N | 5000+50N … 5049+50N | 6000+20N … 6019+20N | 11000+100N … 11099+100N | 12000+N |
+| 0 | 7002 | 7010-7019 | 7010-7019 | 7020-7099 | 7100 |
+| 1 | 7003 | 7110-7119 | 7110-7119 | 7120-7199 | 7200 |
+| 2 | 7004 | 7210-7219 | 7210-7219 | 7220-7299 | 7300 |
+| 3 | 7005 | 7310-7319 | 7310-7319 | 7320-7399 | 7400 |
 
 ```bash
 deploy/local/new-station.sh wxyz 0
@@ -137,10 +136,29 @@ deploy/local/new-station.sh kabc 1
 deploy/local/station.sh kabc up
 ```
 
-Check that nothing else on the server already uses these ports (NPM itself uses 80, 81
-and 443, which do not overlap). Each station needs the ports for the audio inputs you
+Check that nothing else on the server already uses these ports. Each station needs the ports for the audio inputs you
 actually configure; the SRT/RTP admin screen lets you choose any port inside the station's
 block. Allow roughly 1 to 2 GB of RAM per station.
+
+The station blocks are 7010-7109, 7110-7209, 7210-7309 and 7310-7409.
+TCP and UDP can use the same numbers independently. Each block provides 10 UDP
+audio listeners, 80 Janus UDP ports, one MediaMTX UDP port and 10 TCP metadata
+listeners. Ten microphone/guest users joining both Program and Cue can consume
+roughly 40 Janus ports, depending on ICE; test the actual deployment at full load.
+The generic RTP/SRT input defaults in the administration screen do not follow the
+slot: explicitly select an audio port from this table.
+
+### Migrating an existing station
+
+Existing station env files and saved audio/metadata endpoints are not changed by an
+update. Before recreating a station, back up its configuration and database, then
+edit its env file to use the table above (`HTTP_PORT`, `ENGINE_UDP_PORTS`,
+`METADATA_TCP_PORTS`, `JANUS_RTP_PORT_RANGE` and `MEDIAMTX_UDP_PORT`). Update
+saved RTP/SRT listener and metadata server ports in Station Administration, their
+senders/clients, NPM's upstream port, router forwarding and firewall rules. Recreate
+the stack with `deploy/local/station.sh <name> up`. Existing slots above 3 retain
+their old ports until manually reassigned to a free supported slot. Coordinate the
+cutover because changing ports interrupts existing connections.
 
 ## 3. API keys
 
@@ -160,6 +178,16 @@ files private; they also hold the database and guest-link secrets.
 
 ## 4. Nginx Proxy Manager
 
+NPM is managed separately from this repository. To keep its host listeners in the
+7000 range, configure its deployment to publish TCP `7000:80` (HTTP), `7001:443`
+(HTTPS) and, for example, `7006:81` (administration), instead of publishing 80,
+443 and 81 directly. Forward public TCP 80 to host port 7000 and public TCP 443
+to host port 7001 for normal HTTPS URLs and Let's Encrypt HTTP-01 renewal. Restrict
+the administrative port to trusted users. Configure forwarding on the router or
+an external TCP proxy; publishing these ports alone does not provide public port
+translation. The AWS edge also uses 7000/7001, so it cannot share those listeners
+on the same IP with NPM.
+
 Create one **Proxy Host** per station (Hosts → Proxy Hosts → Add):
 
 | Field | Value (station `wxyz`, slot 0) |
@@ -167,7 +195,7 @@ Create one **Proxy Host** per station (Hosts → Proxy Hosts → Add):
 | Domain Names | `wxyz.example.com` |
 | Scheme | `http` |
 | Forward Hostname / IP | `192.168.50.207` (the host's data address, not `localhost`) |
-| Forward Port | `8080` (use 8081 for slot 1, and so on) |
+| Forward Port | `7002` (use 7003 for slot 1, and so on) |
 | Cache Assets | off |
 | Block Common Exploits | on |
 | **Websockets Support** | **on** (required: live mixer updates and the microphone signalling use WebSockets) |
@@ -186,8 +214,8 @@ proxy_read_timeout 86400s;
 proxy_send_timeout 86400s;
 ```
 
-If NPM runs in Docker on the same server, forward to `192.168.50.207:808N` (a published
-port), not a container name. If it runs on another machine, that machine must reach
+If NPM runs in Docker on the same server, forward to the station's published port (for
+example `192.168.50.207:7002`), not a container name. If it runs on another machine, that machine must reach
 192.168.50.207.
 
 Media does **not** go through NPM. Browsers send microphone audio straight to the Janus UDP
@@ -204,18 +232,18 @@ forward for remote users).
 | Health check | `https://wxyz.example.com/api/health` |
 | Guest link | `https://wxyz.example.com/?invite=<token>` (created in the console, "Settings and guests") |
 | Embedding in another web UI | `<iframe src="https://wxyz.example.com/" allow="microphone; autoplay">` |
-| Direct (bypassing NPM, for testing) | `http://192.168.50.207:8080/` (microphone will not work over plain http) |
+| Direct (bypassing NPM, for testing) | `http://192.168.50.207:7002/` (microphone will not work over plain http) |
 
-A second station is simply `https://kabc.example.com/` forwarded to port 8081.
+A second station is simply `https://kabc.example.com/` forwarded to port 7003.
 
 ## 6. Audio and metadata on the two NICs
 
 - **Audio inputs** (SRT/RTP) are published only on 192.168.87.207, so senders must target
-  that address and a UDP port in the station's range, e.g. SRT listener `192.168.87.207:5000`
+  that address and a UDP port in the station's range, e.g. SRT listener `192.168.87.207:7010`
   for slot 0. In admin, leave the network interface at the default (`eth0` inside the
   container): the host NIC is selected by the published address, not by that dropdown.
 - **Metadata** TCP ports are published on 192.168.50.207. Automation systems connect to
-  `192.168.50.207:6000` (slot 0) for a server-mode input or output. For client-mode
+  `192.168.50.207:7010` (slot 0) for a server-mode input or output. For client-mode
   endpoints, the engine connects out to the IP and port you enter.
 - **Outbound connections** (SRT caller, RTP output, metadata client) leave through the server's
   routing table, not the published address. If outputs must use eno3, make sure the audio
@@ -249,7 +277,7 @@ cat deploy/local/backups/wxyz-<timestamp>.sql | \
 ## 8. First-run checklist
 
 - [ ] `deploy/local/station.sh wxyz ps` shows all services running
-- [ ] `curl http://192.168.50.207:8080/api/health` returns HTTP 200
+- [ ] `curl http://192.168.50.207:7002/api/health` returns HTTP 200
 - [ ] `https://wxyz.example.com/` loads and the API key signs in
 - [ ] An SRT/RTP input to `192.168.87.207:<port>` shows a level in the console
 - [ ] A browser microphone connects and shows a level (confirms the Janus UDP ports)

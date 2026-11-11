@@ -7,8 +7,8 @@ services:
       BIND_ADDRESS: 0.0.0.0:8001
       RUST_LOG: info
     ports:
-      - "${ENGINE_UDP_PORTS:-5000-5049}:${ENGINE_UDP_PORTS:-5000-5049}/udp"
-      - "${METADATA_TCP_PORTS:-6000-6019}:${METADATA_TCP_PORTS:-6000-6019}/tcp"
+      - "${ENGINE_UDP_PORTS:-7010-7019}:${ENGINE_UDP_PORTS:-7010-7019}/udp"
+      - "${METADATA_TCP_PORTS:-7010-7019}:${METADATA_TCP_PORTS:-7010-7019}/tcp"
     expose:
       - "8001"
     restart: unless-stopped
@@ -19,9 +19,9 @@ services:
       dockerfile: janus/Dockerfile
     environment:
       DOCKER_IP: ${JANUS_PUBLIC_ADDRESS:-}
-      JANUS_RTP_PORT_RANGE: ${JANUS_RTP_PORT_RANGE:-11000-11099}
+      JANUS_RTP_PORT_RANGE: ${JANUS_RTP_PORT_RANGE:-7020-7099}
     ports:
-      - "${JANUS_RTP_PORT_RANGE:-11000-11099}:${JANUS_RTP_PORT_RANGE:-11000-11099}/udp"
+      - "${JANUS_RTP_PORT_RANGE:-7020-7099}:${JANUS_RTP_PORT_RANGE:-7020-7099}/udp"
     expose:
       - "8088"
       - "8188"
@@ -33,14 +33,14 @@ services:
       MTX_AUTHINTERNALUSERS_0_USER: ${WHIP_WHEP_USERNAME:-cloudconsole-stream}
       MTX_AUTHINTERNALUSERS_0_PASS: ${WHIP_WHEP_PASSWORD:-local-development-whip-whep-password-change-me}
       MTX_WEBRTCADDRESS: :8889
-      MTX_WEBRTCLOCALUDPADDRESS: :${MEDIAMTX_UDP_PORT:-12000}
+      MTX_WEBRTCLOCALUDPADDRESS: :${MEDIAMTX_UDP_PORT:-7100}
       MTX_WEBRTCADDITIONALHOSTS_0: ${JANUS_PUBLIC_ADDRESS:-}
       MTX_WEBRTCICESERVERS2_0_URL: ${STUN_SERVER:-stun:stun.l.google.com:19302}
       MTX_WEBRTCICESERVERS2_1_URL: ${TURN_SERVER_URL:-stun:stun.l.google.com:19302}
       MTX_WEBRTCICESERVERS2_1_USERNAME: ${TURN_SERVER_USERNAME:-}
       MTX_WEBRTCICESERVERS2_1_PASSWORD: ${TURN_SERVER_CREDENTIAL:-}
     ports:
-      - "${MEDIAMTX_UDP_PORT:-12000}:${MEDIAMTX_UDP_PORT:-12000}/udp"
+      - "${MEDIAMTX_UDP_PORT:-7100}:${MEDIAMTX_UDP_PORT:-7100}/udp"
     expose:
       - "8889"
     restart: unless-stopped
@@ -110,7 +110,7 @@ services:
       - janus
       - mediamtx
     ports:
-      - "${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-8080}:80"
+      - "${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-7002}:80"
     restart: unless-stopped
 
 volumes:

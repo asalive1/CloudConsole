@@ -11,17 +11,17 @@
 services:
   audio-engine:
     ports: !override
-      - "${AUDIO_BIND:?set AUDIO_BIND}:${ENGINE_UDP_PORTS:-5000-5049}:${ENGINE_UDP_PORTS:-5000-5049}/udp"
-      - "${METADATA_BIND:?set METADATA_BIND}:${METADATA_TCP_PORTS:-6000-6019}:${METADATA_TCP_PORTS:-6000-6019}/tcp"
+      - "${AUDIO_BIND:?set AUDIO_BIND}:${ENGINE_UDP_PORTS:-7010-7019}:${ENGINE_UDP_PORTS:-7010-7019}/udp"
+      - "${METADATA_BIND:?set METADATA_BIND}:${METADATA_TCP_PORTS:-7010-7019}:${METADATA_TCP_PORTS:-7010-7019}/tcp"
 
   janus:
     ports: !override
-      - "${DATA_BIND:?set DATA_BIND}:${JANUS_RTP_PORT_RANGE:-11000-11099}:${JANUS_RTP_PORT_RANGE:-11000-11099}/udp"
+      - "${DATA_BIND:?set DATA_BIND}:${JANUS_RTP_PORT_RANGE:-7020-7099}:${JANUS_RTP_PORT_RANGE:-7020-7099}/udp"
 
   mediamtx:
     ports: !override
-      - "${DATA_BIND:?set DATA_BIND}:${MEDIAMTX_UDP_PORT:-12000}:${MEDIAMTX_UDP_PORT:-12000}/udp"
+      - "${DATA_BIND:?set DATA_BIND}:${MEDIAMTX_UDP_PORT:-7100}:${MEDIAMTX_UDP_PORT:-7100}/udp"
 
   nginx:
     ports: !override
-      - "${DATA_BIND:?set DATA_BIND}:${HTTP_PORT:-8080}:80"
+      - "${DATA_BIND:?set DATA_BIND}:${HTTP_PORT:-7002}:80"
