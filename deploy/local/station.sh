@@ -17,6 +17,10 @@ env_file="$root/deploy/local/stations/$name.env"
 
 compose=(docker compose -p "cc-$name" --env-file "$env_file"
     -f "$root/docker-compose.yml" -f "$root/docker-compose.prod.yml" -f "$root/docker-compose.local.yml")
+alsa_overlay="$root/deploy/local/stations/$name.alsa.yml"
+if [ -f "$alsa_overlay" ]; then
+    compose+=(-f "$alsa_overlay")
+fi
 
 case "$action" in
     up) exec "${compose[@]}" up -d --build "$@" ;;

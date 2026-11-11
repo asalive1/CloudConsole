@@ -251,6 +251,40 @@ A second station is simply `https://kabc.example.com/` forwarded to port 7003.
 - Docker publishes ports through its own firewall rules, which bypass UFW. Restrict the
   audio and metadata ports at the network level (VLAN or switch ACL) if needed.
 
+### ALSA devices and loopback audio
+
+ALSA is optional. On a Linux Docker host with `/dev/snd` and `/proc/asound/pcm`,
+create `deploy/local/stations/<name>.alsa.yml`:
+
+```yaml
+services:
+  audio-engine:
+    devices:
+      - /dev/snd:/dev/snd
+    volumes:
+      - /proc/asound:/host/asound:ro
+    environment:
+      ALSA_PCM_PATH: /host/asound/pcm
+```
+
+The station wrapper automatically includes this station-specific overlay for all
+operations. Recreate the audio engine with `deploy/local/station.sh <name> up`;
+this interrupts audio while the containers are recreated. The overlay grants the
+engine access to host sound devices; use only for trusted station containers.
+The inventory mount is read-only and outside `/proc`, where Docker blocks mounts.
+If ALSA hardware or loopback devices are added after the container starts, recreate
+the audio engine so Docker can update its device access.
+
+Inspect host playback with `cat /proc/asound/pcm` and
+`cat /proc/asound/card*/pcm*p/sub*/hw_params` while audio is playing. ALSA
+loopback typically sends playback device 0 to capture device 1, or playback 1 to
+capture 0, on the same card and subdevice. For example, playback `hw:0,0,3`
+would use capture `hw:0,1,3`. The list shows card/device pairs, not individual
+subdevices: enter the full identifier manually when needed. Match the playback
+rate, channels, and sample format; raw `hw:` does not convert formats. Confirm
+that a source opens and its meter moves, and review `station.sh <name> logs audio-engine`
+and backend logs if it does not.
+
 ## 7. Operations
 
 ```bash
