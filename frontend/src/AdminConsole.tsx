@@ -383,17 +383,31 @@ function Endpoints({
                   </select>
                 ) : spec.source === "alsa" ? (
                   <>
+                    {alsaDevices.length > 0 && (
+                      <select
+                        aria-label={`Detected ALSA ${direction} devices`}
+                        value={alsaDevices.some((device) => device.device === values[spec.key]) ? String(values[spec.key]) : ""}
+                        onChange={(event) => {
+                          if (event.target.value) setValues({ ...values, [spec.key]: event.target.value });
+                        }}
+                      >
+                        <option value="">Choose a detected device</option>
+                        {alsaDevices.map((device) => (
+                          <option key={device.device} value={device.device}>
+                            {device.device} — {device.name}{device.description && device.description !== device.name ? ` (${device.description})` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                     <input
-                      list={`alsa-${direction}`}
+                      aria-label={spec.label}
                       value={String(values[spec.key] ?? "")}
-                      placeholder={alsaDevices.length > 0 ? "Choose a detected device" : spec.placeholder}
+                      placeholder={spec.placeholder}
                       autoComplete="off"
                       onChange={(event) => setValues({ ...values, [spec.key]: event.target.value })}
                     />
-                    <datalist id={`alsa-${direction}`}>
-                      {alsaDevices.map((device) => <option key={device.device} value={device.device}>{device.name} {device.description}</option>)}
-                    </datalist>
                     {system && alsaDevices.length === 0 && <span className="small muted">No ALSA {direction} devices detected on the server; enter one manually.</span>}
+                    <span className="small muted">Choose a detected device or enter an ALSA identifier, including a subdevice if needed (for example hw:0,1,3).</span>
                   </>
                 ) : spec.kind === "select" ? (
                   <select value={String(values[spec.key] ?? "")} onChange={(event) => setValues({ ...values, [spec.key]: event.target.value })}>
