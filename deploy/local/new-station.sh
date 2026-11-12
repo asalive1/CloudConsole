@@ -72,6 +72,7 @@ JANUS_PUBLIC_ADDRESS=$janus_ip
 STUN_SERVER=stun:stun.l.google.com:19302
 HTTP_PORT=$((7002 + slot))
 ENGINE_UDP_PORTS=$((7010 + slot * 100))-$((7019 + slot * 100))
+AUDIO_INPUT_PORTS=$((7010 + slot * 100))-$((7019 + slot * 100))
 METADATA_TCP_PORTS=$((7010 + slot * 100))-$((7019 + slot * 100))
 JANUS_RTP_PORT_RANGE=$((7020 + slot * 100))-$((7099 + slot * 100))
 MEDIAMTX_UDP_PORT=$((7100 + slot * 100))

@@ -1541,7 +1541,7 @@ fn validate_input(input: &InputTransport) -> Result<(), EngineError> {
             validate_host(address)?;
             validate_audio_channels(*channels)?;
             validate_port(*port)?;
-            crate::network::check_listener_port("ENGINE_UDP_PORTS", *port)
+            crate::network::check_listener_port("AUDIO_INPUT_PORTS", *port)
                 .map_err(EngineError::InvalidRequest)?;
             if *payload_type > 127 {
                 return Err(EngineError::InvalidRequest(
@@ -1570,7 +1570,7 @@ fn validate_input(input: &InputTransport) -> Result<(), EngineError> {
             validate_host(host)?;
             validate_port(*port)?;
             if *mode == SrtMode::Listener {
-                crate::network::check_listener_port("ENGINE_UDP_PORTS", *port)
+                crate::network::check_listener_port("AUDIO_INPUT_PORTS", *port)
                     .map_err(EngineError::InvalidRequest)?;
             }
             validate_srt_latency(*latency_ms)?;
@@ -1642,7 +1642,7 @@ fn validate_output(output: &OutputTransport) -> Result<(), EngineError> {
             validate_host(host)?;
             validate_port(*port)?;
             if *mode == SrtMode::Listener {
-                crate::network::check_listener_port("ENGINE_UDP_PORTS", *port)
+                crate::network::check_listener_port("AUDIO_INPUT_PORTS", *port)
                     .map_err(EngineError::InvalidRequest)?;
             }
             validate_srt_latency(*latency_ms)?;

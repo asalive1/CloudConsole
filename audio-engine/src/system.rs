@@ -33,7 +33,7 @@ pub fn discover() -> SystemDevices {
         network_interfaces: network_interfaces(),
         default_audio_address: crate::network::default_address("AUDIO_BIND"),
         default_metadata_address: crate::network::default_address("METADATA_BIND"),
-        audio_listener_ports: crate::network::default_address("ENGINE_UDP_PORTS"),
+        audio_listener_ports: crate::network::audio_listener_ports(),
         metadata_listener_ports: crate::network::default_address("METADATA_TCP_PORTS"),
         alsa_inputs,
         alsa_outputs,

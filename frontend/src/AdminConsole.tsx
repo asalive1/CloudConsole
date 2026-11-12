@@ -291,7 +291,7 @@ function Endpoints({
   function newDefaults(next: string): Cfg {
     const defaults = defaultsFor(direction, next);
     if (direction === "input" && (next === "rtp" || next === "srt") && system?.audio_listener_ports) {
-      defaults.port = Number(system.audio_listener_ports.split("-")[0]);
+      defaults.port = Number(system.audio_listener_ports.split(",")[0].split("-")[0].trim());
     }
     return defaults;
   }
@@ -374,8 +374,11 @@ function Endpoints({
       {open && (
         <form onSubmit={save} className="form">
           <h3>{editing ? "Edit" : "New"} {scope === "automation" ? "automation input" : direction}</h3>
-          {system?.audio_listener_ports && (type === "rtp" && direction === "input" || type === "srt" && values.mode === "listener") && (
-            <p>Listener ports for this station: {system.audio_listener_ports}. Destination ports for outgoing connections are not restricted.</p>
+          {system?.audio_listener_ports && (type === "rtp" || type === "srt") && (
+            <p>
+              Station audio listener ports: {system.audio_listener_ports}. Change AUDIO_INPUT_PORTS in the station
+              environment file and recreate the station to use other listener ports. Outgoing destination ports are not restricted.
+            </p>
           )}
           <label>
             <span className="label">Name</span>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import Janus, { type JanusJS } from "janus-gateway";
 import adapter from "webrtc-adapter";
 import { API_BASE, type MixerChannel, type Participant } from "./api";
+import { roomMix } from "./liveMix";
 
 type Bus = "program" | "cue";
 type JanusMessage = JanusJS.Message;
@@ -43,17 +44,6 @@ export type LiveAudioState = {
 const PLUGIN = "janus.plugin.audiobridge";
 let janusInit: Promise<void> | null = null;
 
-const DEFAULT_CHANNEL = (id: string): MixerChannel => ({
-  channel_id: id,
-  display_name: "",
-  role: "",
-  fader: 1,
-  is_on: true,
-  cue_enabled: false,
-  muted: false,
-  revision: 0,
-});
-
 export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
   const { participant, mode, inputDeviceId } = options;
   const [status, setStatus] = useState("Not connected");
@@ -77,6 +67,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
   optionsRef.current = options;
   const channelRef = useRef<MixerChannel | null>(null);
   const handles = useRef(new Map<Bus, JanusPluginHandle>());
+  const localTracks = useRef(new Map<Bus, MediaStreamTrack>());
   const remoteAudio = useRef(new Map<Bus, HTMLAudioElement>());
   const sidetoneAudio = useRef<HTMLAudioElement | null>(null);
 
@@ -93,8 +84,9 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
     }
     const sidetone = sidetoneAudio.current;
     if (sidetone) {
-      sidetone.volume = current.monitorVolume;
-      sidetone.muted = current.monitorMuted || !current.sidetone || current.monitorBus !== "program";
+      const mix = roomMix("program", channelRef.current, current.micMuted, current.mode === "live");
+      sidetone.volume = Math.min(1, current.monitorVolume * mix.volume / 100);
+      sidetone.muted = current.monitorMuted || !current.sidetone || current.monitorBus !== "program" || mix.muted;
       if (current.outputDeviceId && "setSinkId" in sidetone) {
         void (sidetone as HTMLAudioElement & { setSinkId: (id: string) => Promise<void> })
           .setSinkId(current.outputDeviceId)
@@ -105,16 +97,17 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
 
   function roomSettings(bus: Bus) {
     const current = optionsRef.current;
-    const mixer = channelRef.current ?? DEFAULT_CHANNEL(current.participant?.session_id ?? "");
-    const commonMuted = current.micMuted || mixer.muted || current.mode !== "live";
-    const muted = bus === "program" ? commonMuted || !mixer.is_on : commonMuted || !mixer.cue_enabled;
-    return { muted, volume: Math.round(mixer.fader * 100) };
+    return roomMix(bus, channelRef.current, current.micMuted, current.mode === "live");
   }
 
   function applyMixer() {
     if (optionsRef.current.mode !== "live") return;
+    applyMonitor();
     for (const bus of ["program", "cue"] as const) {
-      handles.current.get(bus)?.send({ message: { request: "configure", ...roomSettings(bus) } });
+      const settings = roomSettings(bus);
+      const track = localTracks.current.get(bus);
+      if (track) track.enabled = !settings.muted;
+      handles.current.get(bus)?.send({ message: { request: "configure", ...settings } });
     }
   }
 
@@ -157,6 +150,8 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
     };
 
     const cleanup = () => {
+      for (const track of localTracks.current.values()) track.enabled = false;
+      localTracks.current.clear();
       handles.current.clear();
       for (const audio of remoteAudio.current.values()) {
         audio.pause();
@@ -205,6 +200,15 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
           channelRef.current = own;
           setChannel(own);
         }
+      };
+      const currentSocket = socket;
+      socket.onclose = () => {
+        if (stopped || socket !== currentSocket) return;
+        channelRef.current = null;
+        setChannel(null);
+        applyMixer();
+        setError("Mixer connection lost; microphone muted while reconnecting.");
+        scheduleReconnect();
       };
     };
 
@@ -281,7 +285,14 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
           if (typeof event.error === "string") setError(`${bus} audio error: ${event.error}`);
         },
         onlocaltrack: (track: MediaStreamTrack, added: boolean) => {
-          if (bus !== "program" || track.kind !== "audio") return;
+          if (track.kind !== "audio") return;
+          if (added) {
+            localTracks.current.set(bus, track);
+            track.enabled = !roomSettings(bus).muted;
+          } else {
+            localTracks.current.delete(bus);
+          }
+          if (bus !== "program") return;
           if (!added) {
             sidetoneAudio.current = null;
             meterStop.current?.();
@@ -350,6 +361,11 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
 
     const start = async () => {
       if (stopped) return;
+      const previousSocket = socket;
+      socket = null;
+      previousSocket?.close();
+      channelRef.current = null;
+      setChannel(null);
       wasConnected = false;
       roomNames.current.clear();
       published.clear();
@@ -403,6 +419,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       void report("disconnected");
       socket?.close();
+      channelRef.current = null;
       janus?.destroy({});
       cleanup();
       setConnected(false);

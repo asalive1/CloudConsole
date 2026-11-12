@@ -6,6 +6,7 @@ services:
     environment:
       BIND_ADDRESS: 0.0.0.0:8001
       RUST_LOG: info
+      AUDIO_INPUT_PORTS: ${AUDIO_INPUT_PORTS:-${ENGINE_UDP_PORTS:-7010-7019}}
     ports:
       - "${ENGINE_UDP_PORTS:-7010-7019}:${ENGINE_UDP_PORTS:-7010-7019}/udp"
       - "${METADATA_TCP_PORTS:-7010-7019}:${METADATA_TCP_PORTS:-7010-7019}/tcp"

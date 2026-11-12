@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import DelayControls from "./DelayControls";
 
 declare const __APP_VERSION__: string;
@@ -68,6 +68,8 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   const [guestChoice, setGuestChoice] = useState("program_mix");
   const [error, setError] = useState("");
   const [newLink, setNewLink] = useState("");
+  const pendingMix = useRef(new Map<string, Partial<Pick<MixerChannel, "fader" | "is_on" | "cue_enabled" | "muted">>>());
+  const sendingMix = useRef(new Set<string>());
 
   useEffect(() => {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
@@ -163,10 +165,21 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   const metricFor = (id: string) => metrics.data?.sources.find((source) => source.id === id);
 
   async function patchChannel(id: string, body: Partial<Pick<MixerChannel, "fader" | "is_on" | "cue_enabled" | "muted">>) {
+    pendingMix.current.set(id, { ...pendingMix.current.get(id), ...body });
+    if (sendingMix.current.has(id)) return;
+    sendingMix.current.add(id);
     try {
-      await apiRequest(`/mixer/channels/${id}`, { method: "PATCH", headers: json, body: JSON.stringify(body) });
-    } catch (cause) {
-      setError(errorMessage(cause));
+      while (pendingMix.current.has(id)) {
+        const next = pendingMix.current.get(id);
+        pendingMix.current.delete(id);
+        try {
+          await apiRequest(`/mixer/channels/${id}`, { method: "PATCH", headers: json, body: JSON.stringify(next) });
+        } catch (cause) {
+          setError(`Mixer update failed: ${errorMessage(cause)}`);
+        }
+      }
+    } finally {
+      sendingMix.current.delete(id);
     }
   }
 
@@ -484,9 +497,8 @@ function Strip({
   useEffect(() => {
     if (!dragging) setFader(channel.fader);
   }, [channel.fader, dragging]);
-  const commit = () => {
+  const finish = () => {
     setDragging(false);
-    onChange({ fader });
   };
   const isMic = channel.role !== "automation" && channel.role !== "aux";
   return (
@@ -505,10 +517,14 @@ function Strip({
           aria-label={`${channel.display_name} fader`}
           onChange={(event) => {
             setDragging(true);
-            setFader(Number(event.target.value));
+            const value = Number(event.target.value);
+            setFader(value);
+            onChange({ fader: value });
           }}
-          onPointerUp={commit}
-          onKeyUp={commit}
+          onPointerUp={finish}
+          onPointerCancel={finish}
+          onKeyUp={finish}
+          onBlur={finish}
         />
       </div>
       <button

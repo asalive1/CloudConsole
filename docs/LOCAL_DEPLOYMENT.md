@@ -194,6 +194,34 @@ roughly 40 Janus ports, depending on ICE; test the actual deployment at full loa
 The generic RTP/SRT input defaults in the administration screen do not follow the
 slot: explicitly select an audio port from this table.
 
+### Custom audio listener ports
+
+The station environment file controls which UDP ports may be used for RTP inputs and
+SRT listeners (including an SRT output in listener mode). New stations default
+`AUDIO_INPUT_PORTS` to their slot's audio range. Existing stations without this
+setting continue to use their existing `ENGINE_UDP_PORTS` range.
+
+To add the standard AES67/Livewire port 5004 to a slot 0 station, edit its
+`deploy/local/stations/<name>.env` file and add or change this line:
+
+```dotenv
+AUDIO_INPUT_PORTS=5004,7010-7019,10005
+```
+
+Individual ports and inclusive ranges are comma-separated; ports must be between
+1 and 65535. Outgoing RTP destination ports and SRT caller ports are not restricted
+by this list. Metadata, Janus WebRTC, and WHIP/WHEP ports use their own settings.
+Avoid collisions with those services, other stations, or software already using a
+port on the selected interface. In particular, two host-network stations cannot
+both claim the same unicast UDP address and port; plan 5004 and interface bindings
+accordingly. Multicast and firewall behavior depend on the network and receiver.
+
+Apply changes with `deploy/local/station.sh <name> up`, which recreates containers
+and interrupts audio. `restart` alone does not apply environment or port changes.
+The station wrapper publishes the configured UDP ports in bridge-network mode;
+direct Docker Compose commands need an equivalent port override. Host-network
+mode uses the list directly and still requires firewall rules on the host and network.
+
 ### Migrating an existing station
 
 Existing station env files and saved audio/metadata endpoints are not changed by an
