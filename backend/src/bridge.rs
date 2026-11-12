@@ -252,41 +252,6 @@ fn parse_default_gateway(routes: &str) -> Result<IpAddr, String> {
     Err("container has no IPv4 default gateway for the audio bridge".to_owned())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn discovers_bridge_gateway_and_requires_a_gateway_route() {
-        let routes = "Iface Destination Gateway Flags RefCnt Use Metric Mask\n\
-                      eth0 00000000 010013AC 0003 0 0 0 00000000\n";
-        assert_eq!(
-            parse_default_gateway(routes).unwrap(),
-            "172.19.0.1".parse::<IpAddr>().unwrap()
-        );
-        assert!(parse_default_gateway(
-            "Iface Destination Gateway Flags\neth0 00000000 00000000 0001"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn assigns_non_overlapping_bridge_ports_to_four_slots() {
-        let ports: Vec<_> = (0..4)
-            .flat_map(|slot| {
-                [
-                    Bus::Program.listen_port(Some(slot)),
-                    Bus::Cue.listen_port(Some(slot)),
-                ]
-            })
-            .collect();
-        assert_eq!(
-            ports,
-            vec![10500, 10501, 10502, 10503, 10504, 10505, 10506, 10507]
-        );
-    }
-}
-
 async fn resolve(url: &str) -> Result<IpAddr, String> {
     let parsed = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
     let host = parsed.host_str().ok_or("URL has no host")?.to_owned();
@@ -340,4 +305,39 @@ async fn parse(response: reqwest::Response) -> Result<Value, String> {
         ));
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovers_bridge_gateway_and_requires_a_gateway_route() {
+        let routes = "Iface Destination Gateway Flags RefCnt Use Metric Mask\n\
+                      eth0 00000000 010013AC 0003 0 0 0 00000000\n";
+        assert_eq!(
+            parse_default_gateway(routes).unwrap(),
+            "172.19.0.1".parse::<IpAddr>().unwrap()
+        );
+        assert!(parse_default_gateway(
+            "Iface Destination Gateway Flags\neth0 00000000 00000000 0001"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn assigns_non_overlapping_bridge_ports_to_four_slots() {
+        let ports: Vec<_> = (0..4)
+            .flat_map(|slot| {
+                [
+                    Bus::Program.listen_port(Some(slot)),
+                    Bus::Cue.listen_port(Some(slot)),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            ports,
+            vec![10500, 10501, 10502, 10503, 10504, 10505, 10506, 10507]
+        );
+    }
 }
