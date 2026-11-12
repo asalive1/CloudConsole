@@ -1456,6 +1456,7 @@ impl OutputTransport {
     }
 
     fn gst_description(&self) -> Result<String, EngineError> {
+        // A newly attached sink must not pause the live pipeline to preroll.
         match self {
             Self::Alsa {
                 device,
@@ -1465,7 +1466,7 @@ impl OutputTransport {
             } => {
                 let format = pcm_format(*bit_depth, false)?;
                 Ok(format!(
-                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate},channels={channels},format={format} ! alsasink device={} sync=true",
+                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate},channels={channels},format={format} ! alsasink device={} sync=true async=false",
                     gst_quote(device)
                 ))
             }
@@ -1484,7 +1485,7 @@ impl OutputTransport {
                 };
                 let interface_property = rtp_output_binding(host, interface.as_deref())?;
                 Ok(format!(
-                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port}{interface_property} sync=true",
+                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port}{interface_property} sync=true async=false",
                     gst_quote(host)
                 ))
             }
@@ -1513,7 +1514,7 @@ impl OutputTransport {
                     .map(|address| format!(" localaddress={}", gst_quote(&address)))
                     .unwrap_or_default();
                 Ok(format!(
-                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! voaacenc bitrate={bitrate} ! aacparse ! mpegtsmux ! srtsink uri={}{local_property} sync=true",
+                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! voaacenc bitrate={bitrate} ! aacparse ! mpegtsmux ! srtsink uri={}{local_property} sync=true async=false",
                     gst_quote(&uri)
                 ))
             }
@@ -2243,6 +2244,7 @@ fn default_aac_bitrate() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::UdpSocket;
 
     #[test]
     fn live_delay_status_ignores_transient_queue_levels() {
@@ -2332,5 +2334,186 @@ mod tests {
         assert!(!is_silent_pcm(&speech));
         assert!(!is_silent_pcm(&[]));
         assert!(is_silent_pcm(&[silent.as_slice(), &[1]].concat()));
+    }
+
+    #[test]
+    fn output_sinks_keep_live_pipeline_out_of_preroll() {
+        let outputs = [
+            OutputTransport::Alsa {
+                device: "null".to_owned(),
+                sample_rate: 48_000,
+                channels: 2,
+                bit_depth: 16,
+            },
+            OutputTransport::Rtp {
+                host: "127.0.0.1".to_owned(),
+                port: 7010,
+                encoding: RtpEncoding::L24,
+                channels: 2,
+                payload_type: 96,
+                interface: None,
+            },
+            OutputTransport::Srt {
+                host: "127.0.0.1".to_owned(),
+                port: 7010,
+                mode: SrtMode::Listener,
+                latency_ms: 120,
+                stream_id: None,
+                passphrase: None,
+                interface: None,
+                pbkeylen: None,
+                bitrate: 128_000,
+            },
+        ];
+        for output in outputs {
+            let description = output.gst_description().unwrap();
+            assert!(
+                description.contains("sync=true async=false"),
+                "{description}"
+            );
+        }
+    }
+
+    #[test]
+    fn rtp_output_does_not_interrupt_bridge_audio() {
+        gst::init().unwrap();
+        let output = UdpSocket::bind("127.0.0.1:0").unwrap();
+        output
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let output_port = output.local_addr().unwrap().port();
+        let bridge_receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let bridge_port = bridge_receiver.local_addr().unwrap().port();
+        let bridge_listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let listen_port = bridge_listener.local_addr().unwrap().port();
+        drop(bridge_receiver);
+        drop(bridge_listener);
+
+        let receiver = gst::parse::launch(&format!(
+            "udpsrc address=127.0.0.1 port={bridge_port} caps=\"application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string)OPUS,payload=(int)100\" ! rtpopusdepay ! opusdec ! audioconvert ! audio/x-raw,format=F32LE ! identity name=decoded ! fakesink sync=false async=false"
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let measuring = Arc::new(AtomicBool::new(false));
+        let audible = Arc::new(Mutex::new(Vec::new()));
+        let probe_measuring = Arc::clone(&measuring);
+        let probe_audible = Arc::clone(&audible);
+        receiver
+            .by_name("decoded")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                if probe_measuring.load(Ordering::Relaxed) {
+                    if let Some(buffer) = info.buffer() {
+                        if let Ok(data) = buffer.map_readable() {
+                            let has_tone = data
+                                .as_slice()
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .any(|bytes| f32::from_le_bytes(*bytes).abs() > 0.01);
+                            if has_tone {
+                                probe_audible.lock().unwrap().push(Instant::now());
+                            }
+                        }
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            })
+            .unwrap();
+        receiver.set_state(gst::State::Playing).unwrap();
+
+        let mut engine = AudioEngine::new().unwrap();
+        engine
+            .start_bridge(BridgeConfig {
+                bus: BridgeBus::Program,
+                listen_port,
+                listen_address: "127.0.0.1".to_owned(),
+                remote_host: "127.0.0.1".to_owned(),
+                remote_port: bridge_port,
+                payload_type: 100,
+            })
+            .unwrap();
+        engine
+            .add_output_with_id(
+                Uuid::new_v4(),
+                "network output".to_owned(),
+                OutputTransport::Rtp {
+                    host: "127.0.0.1".to_owned(),
+                    port: output_port,
+                    encoding: RtpEncoding::L24,
+                    channels: 2,
+                    payload_type: 96,
+                    interface: None,
+                },
+            )
+            .unwrap();
+        let source = Uuid::new_v4();
+        engine
+            .add_source_with_id(
+                source,
+                "test tone".to_owned(),
+                SourceType::Automation,
+                InputTransport::Test { frequency: 1_000 },
+            )
+            .unwrap();
+        engine.set_source_mix(source, 1.0, false, false).unwrap();
+
+        thread::sleep(Duration::from_secs(7));
+        output.set_nonblocking(true).unwrap();
+        let mut packet = [0u8; 2048];
+        while output.recv(&mut packet).is_ok() {}
+        output.set_nonblocking(false).unwrap();
+        let start = Instant::now();
+        measuring.store(true, Ordering::Relaxed);
+        let mut output_packets = 0;
+        let mut audible_output_packets = 0;
+        while start.elapsed() < Duration::from_secs(5) {
+            match output.recv(&mut packet) {
+                Ok(size) => {
+                    output_packets += 1;
+                    if size > 12 && packet[12..size].iter().any(|byte| *byte != 0) {
+                        audible_output_packets += 1;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => panic!("RTP receiver failed: {error}"),
+            }
+        }
+        measuring.store(false, Ordering::Relaxed);
+        let end = Instant::now();
+        engine.pipeline.set_state(gst::State::Null).unwrap();
+        receiver.set_state(gst::State::Null).unwrap();
+
+        let samples = audible.lock().unwrap();
+        let mut previous = start;
+        let mut max_gap = Duration::ZERO;
+        for sample in samples.iter().copied().chain(std::iter::once(end)) {
+            max_gap = max_gap.max(sample.saturating_duration_since(previous));
+            previous = sample;
+        }
+        assert!(
+            samples.len() >= 150,
+            "only {} audible bridge buffers",
+            samples.len()
+        );
+        assert!(
+            max_gap < Duration::from_millis(750),
+            "bridge audio gap: {max_gap:?}"
+        );
+        assert!(
+            output_packets >= 200,
+            "only {output_packets} output packets"
+        );
+        assert!(
+            audible_output_packets * 100 >= output_packets * 95,
+            "only {audible_output_packets}/{output_packets} output packets contained audio"
+        );
     }
 }
