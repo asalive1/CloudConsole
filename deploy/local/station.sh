@@ -17,6 +17,9 @@ env_file="$root/deploy/local/stations/$name.env"
 
 compose=(docker compose -p "cc-$name" --env-file "$env_file"
     -f "$root/docker-compose.yml" -f "$root/docker-compose.prod.yml" -f "$root/docker-compose.local.yml")
+if grep -qx 'HOST_AUDIO_NETWORK=true' "$env_file"; then
+    compose+=(-f "$root/docker-compose.host-audio.yml")
+fi
 alsa_overlay="$root/deploy/local/stations/$name.alsa.yml"
 if [ -f "$alsa_overlay" ]; then
     compose+=(-f "$alsa_overlay")

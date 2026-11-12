@@ -272,10 +272,16 @@ pub struct BridgeConfig {
     #[serde(skip)]
     pub bus: BridgeBus,
     pub listen_port: u16,
+    #[serde(default = "default_bridge_address")]
+    pub listen_address: String,
     pub remote_host: String,
     pub remote_port: u16,
     #[serde(default = "default_bridge_payload_type")]
     pub payload_type: u8,
+}
+
+fn default_bridge_address() -> String {
+    "0.0.0.0".to_owned()
 }
 
 fn default_bridge_payload_type() -> u8 {
@@ -286,6 +292,7 @@ fn default_bridge_payload_type() -> u8 {
 pub struct BridgeStatus {
     pub active: bool,
     pub listen_port: Option<u16>,
+    pub listen_address: Option<String>,
     pub remote: Option<String>,
     pub received_packets: u64,
     pub sent_packets: u64,
@@ -808,6 +815,17 @@ impl AudioEngine {
                 "bridge ports must be 1024 or higher".to_owned(),
             ));
         }
+        let listen_address: IpAddr = config.listen_address.parse().map_err(|_| {
+            EngineError::InvalidRequest("bridge listen_address must be an IP address".to_owned())
+        })?;
+        if crate::network::host_mode()
+            && (listen_address.is_unspecified()
+                || crate::system::interface_for_ipv4(&config.listen_address).is_none())
+        {
+            return Err(EngineError::InvalidRequest(
+                "bridge listen_address must be a local interface address".to_owned(),
+            ));
+        }
         if !(96..=127).contains(&config.payload_type) {
             return Err(EngineError::InvalidRequest(
                 "payload_type must be between 96 and 127".to_owned(),
@@ -825,8 +843,8 @@ impl AudioEngine {
         };
         let rx_bin = gst::parse::bin_from_description(
             &format!(
-                "udpsrc name=bridge_udpsrc port={} caps=\"application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string)OPUS,payload=(int){}\" ! {rx_tail}",
-                config.listen_port, config.payload_type
+                "udpsrc name=bridge_udpsrc address={} port={} caps=\"application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string)OPUS,payload=(int){}\" ! {rx_tail}",
+                gst_quote(&config.listen_address), config.listen_port, config.payload_type
             ),
             true,
         )
@@ -959,6 +977,7 @@ impl AudioEngine {
             Some(bridge) => BridgeStatus {
                 active: true,
                 listen_port: Some(bridge.config.listen_port),
+                listen_address: Some(bridge.config.listen_address.clone()),
                 remote: Some(format!(
                     "{}:{}",
                     bridge.config.remote_host, bridge.config.remote_port
@@ -969,6 +988,7 @@ impl AudioEngine {
             None => BridgeStatus {
                 active: false,
                 listen_port: None,
+                listen_address: None,
                 remote: None,
                 received_packets: 0,
                 sent_packets: 0,
@@ -1520,6 +1540,8 @@ fn validate_input(input: &InputTransport) -> Result<(), EngineError> {
             validate_host(address)?;
             validate_audio_channels(*channels)?;
             validate_port(*port)?;
+            crate::network::check_listener_port("ENGINE_UDP_PORTS", *port)
+                .map_err(EngineError::InvalidRequest)?;
             if *payload_type > 127 {
                 return Err(EngineError::InvalidRequest(
                     "RTP payload_type must be between 0 and 127".to_owned(),
@@ -1536,6 +1558,7 @@ fn validate_input(input: &InputTransport) -> Result<(), EngineError> {
         InputTransport::Srt {
             host,
             port,
+            mode,
             latency_ms,
             stream_id,
             passphrase,
@@ -1545,6 +1568,10 @@ fn validate_input(input: &InputTransport) -> Result<(), EngineError> {
             validate_interface(interface.as_deref())?;
             validate_host(host)?;
             validate_port(*port)?;
+            if *mode == SrtMode::Listener {
+                crate::network::check_listener_port("ENGINE_UDP_PORTS", *port)
+                    .map_err(EngineError::InvalidRequest)?;
+            }
             validate_srt_latency(*latency_ms)?;
             validate_srt_credentials(stream_id.as_deref(), passphrase.as_deref())?;
             Ok(())
@@ -1601,6 +1628,7 @@ fn validate_output(output: &OutputTransport) -> Result<(), EngineError> {
         OutputTransport::Srt {
             host,
             port,
+            mode,
             latency_ms,
             stream_id,
             passphrase,
@@ -1612,6 +1640,10 @@ fn validate_output(output: &OutputTransport) -> Result<(), EngineError> {
             validate_interface(interface.as_deref())?;
             validate_host(host)?;
             validate_port(*port)?;
+            if *mode == SrtMode::Listener {
+                crate::network::check_listener_port("ENGINE_UDP_PORTS", *port)
+                    .map_err(EngineError::InvalidRequest)?;
+            }
             validate_srt_latency(*latency_ms)?;
             validate_srt_credentials(stream_id.as_deref(), passphrase.as_deref())?;
             if let Some(key_length) = pbkeylen {
@@ -2072,31 +2104,36 @@ fn rtp_input_binding(
     address: &str,
     interface: Option<&str>,
 ) -> Result<(String, String), EngineError> {
-    let Some(name) = interface.filter(|name| !name.is_empty()) else {
+    let Some((name, selected_address)) = audio_interface(interface)? else {
         return Ok((address.to_owned(), String::new()));
     };
     if is_multicast_host(address) {
         return Ok((
             address.to_owned(),
-            format!(" multicast-iface={}", gst_quote(name)),
+            format!(" multicast-iface={}", gst_quote(&name)),
         ));
     }
     let unspecified = address
         .parse::<IpAddr>()
         .is_ok_and(|address| address.is_unspecified());
     if unspecified {
-        return Ok((interface_ipv4(name)?, String::new()));
+        return Ok((selected_address, String::new()));
+    }
+    if crate::network::host_mode() && address != selected_address {
+        return Err(EngineError::InvalidRequest(
+            "RTP input address must match the selected interface (or be 0.0.0.0)".to_owned(),
+        ));
     }
     Ok((address.to_owned(), String::new()))
 }
 
 fn rtp_output_binding(host: &str, interface: Option<&str>) -> Result<String, EngineError> {
-    let Some(name) = interface.filter(|name| !name.is_empty()) else {
+    let Some((name, address)) = audio_interface(interface)? else {
         return Ok(String::new());
     };
-    let mut properties = format!(" bind-address={}", gst_quote(&interface_ipv4(name)?));
+    let mut properties = format!(" bind-address={}", gst_quote(&address));
     if is_multicast_host(host) {
-        properties.push_str(&format!(" multicast-iface={}", gst_quote(name)));
+        properties.push_str(&format!(" multicast-iface={}", gst_quote(&name)));
     }
     Ok(properties)
 }
@@ -2107,14 +2144,28 @@ fn srt_binding(
     mode: SrtMode,
     interface: Option<&str>,
 ) -> Result<(String, Option<String>), EngineError> {
-    let Some(name) = interface.filter(|name| !name.is_empty()) else {
+    let Some((_, address)) = audio_interface(interface)? else {
         return Ok((host.to_owned(), None));
     };
-    let address = interface_ipv4(name)?;
     match mode {
         SrtMode::Listener => Ok((address, None)),
         SrtMode::Caller => Ok((host.to_owned(), Some(address))),
     }
+}
+
+fn audio_interface(interface: Option<&str>) -> Result<Option<(String, String)>, EngineError> {
+    if let Some(name) = interface.filter(|name| !name.is_empty()) {
+        return Ok(Some((name.to_owned(), interface_ipv4(name)?)));
+    }
+    let Some(address) = crate::network::default_address("AUDIO_BIND") else {
+        return Ok(None);
+    };
+    let name = crate::network::default_audio_interface()
+        .map_err(EngineError::InvalidRequest)?
+        .ok_or_else(|| {
+            EngineError::InvalidRequest("default audio interface not found".to_owned())
+        })?;
+    Ok(Some((name, address)))
 }
 
 fn pcm_format(bit_depth: u8, big_endian: bool) -> Result<&'static str, EngineError> {
@@ -2237,6 +2288,22 @@ mod tests {
         assert!(validate_bit_depth(32).is_err());
         assert!(validate_audio_channels(3).is_err());
         assert!(validate_port(0).is_err());
+    }
+
+    #[test]
+    fn binds_selected_loopback_interface() {
+        let (_, address) = audio_interface(Some("lo")).unwrap().unwrap();
+        assert_eq!(address, "127.0.0.1");
+        assert!(rtp_output_binding("127.0.0.1", Some("lo"))
+            .unwrap()
+            .contains("bind-address=\"127.0.0.1\""));
+        assert_eq!(
+            srt_binding("0.0.0.0", SrtMode::Listener, Some("lo"))
+                .unwrap()
+                .0,
+            "127.0.0.1"
+        );
+        assert!(audio_interface(Some("does-not-exist")).is_err());
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub struct AppState {
     pub station_api_key: String,
     pub guest_jwt_secret: String,
     pub audio_engine_url: String,
+    pub engine_host_network_slot: Option<u16>,
     pub http_client: reqwest::Client,
     pub janus_http_url: String,
     pub janus_room_id: u64,
@@ -100,6 +101,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     let (mixer_updates, _) = broadcast::channel(128);
+    let engine_host_network_slot = match env::var("ENGINE_HOST_NETWORK_SLOT") {
+        Ok(value) if !value.is_empty() => {
+            let slot: u16 = value.parse()?;
+            if slot > 3 {
+                return Err("ENGINE_HOST_NETWORK_SLOT must be between 0 and 3".into());
+            }
+            Some(slot)
+        }
+        _ => None,
+    };
     let state = AppState {
         pool,
         station_id,
@@ -107,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         guest_jwt_secret,
         audio_engine_url: env::var("AUDIO_ENGINE_URL")
             .unwrap_or_else(|_| "http://audio-engine:8001".to_owned()),
+        engine_host_network_slot,
         http_client: reqwest::Client::new(),
         janus_http_url: env::var("JANUS_HTTP_URL")
             .unwrap_or_else(|_| "http://janus:8088/janus".to_owned()),

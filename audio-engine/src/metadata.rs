@@ -218,6 +218,10 @@ fn validate(endpoints: &[MetadataEndpoint]) -> Result<(), String> {
         if endpoint.port == 0 {
             return Err("metadata port must be between 1 and 65535".to_owned());
         }
+        bind_ip(endpoint)?;
+        if endpoint.mode == Mode::Server {
+            crate::network::check_listener_port("METADATA_TCP_PORTS", endpoint.port)?;
+        }
         if endpoint.mode == Mode::Client {
             let host = endpoint.host.as_deref().unwrap_or("").trim();
             if host.is_empty() || host.len() > 253 || host.contains(char::is_whitespace) {
@@ -234,7 +238,13 @@ fn bind_ip(endpoint: &MetadataEndpoint) -> Result<Option<IpAddr>, String> {
         .as_deref()
         .filter(|name| !name.is_empty())
     else {
-        return Ok(None);
+        return crate::network::default_address("METADATA_BIND")
+            .map(|address| {
+                address
+                    .parse()
+                    .map_err(|_| "invalid METADATA_BIND".to_owned())
+            })
+            .transpose();
     };
     crate::system::interface_ipv4(name)
         .and_then(|address| address.parse().ok())

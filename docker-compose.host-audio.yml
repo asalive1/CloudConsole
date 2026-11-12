@@ -1,0 +1,37 @@
+# Optional native Linux host networking for the audio engine.
+services:
+  audio-engine:
+    network_mode: host
+    ports: !reset []
+    expose: !reset []
+    environment:
+      HOST_AUDIO_NETWORK: "true"
+      AUDIO_BIND: ${AUDIO_BIND:?set AUDIO_BIND}
+      METADATA_BIND: ${METADATA_BIND:?set METADATA_BIND}
+      ENGINE_UDP_PORTS: ${ENGINE_UDP_PORTS:?set ENGINE_UDP_PORTS}
+      METADATA_TCP_PORTS: ${METADATA_TCP_PORTS:?set METADATA_TCP_PORTS}
+    volumes:
+      - engine-control:/run/cloudconsole
+    healthcheck:
+      test: ["CMD", "cloud-console-audio-engine", "--socket-health"]
+
+  engine-proxy:
+    image: nginx:stable-alpine
+    volumes:
+      - engine-control:/run/cloudconsole
+      - ./deploy/local/engine-proxy.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      audio-engine:
+        condition: service_healthy
+    restart: unless-stopped
+
+  backend:
+    environment:
+      AUDIO_ENGINE_URL: http://engine-proxy:8001
+      ENGINE_HOST_NETWORK_SLOT: ${STATION_SLOT:?set STATION_SLOT}
+    depends_on:
+      engine-proxy:
+        condition: service_started
+
+volumes:
+  engine-control:

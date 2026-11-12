@@ -38,6 +38,10 @@ type FieldSpec = {
 };
 type SystemDevices = {
   network_interfaces: Array<{ name: string; state: string; addresses: string[] }>;
+  default_audio_address?: string | null;
+  default_metadata_address?: string | null;
+  audio_listener_ports?: string | null;
+  metadata_listener_ports?: string | null;
   alsa_inputs: Array<{ device: string; name: string; description: string }>;
   alsa_outputs: Array<{ device: string; name: string; description: string }>;
 };
@@ -281,12 +285,20 @@ function Endpoints({
     const resourceType = resource ? String((resource.config.type as string | undefined) ?? resource.type ?? "srt") : "srt";
     setType(resourceType);
     setEnabled(resource?.enabled ?? true);
-    setValues(resource ? legacyInterface({ ...resource.config }) : defaultsFor(direction, resourceType));
+    setValues(resource ? legacyInterface({ ...resource.config }) : newDefaults(resourceType));
+  }
+
+  function newDefaults(next: string): Cfg {
+    const defaults = defaultsFor(direction, next);
+    if (direction === "input" && (next === "rtp" || next === "srt") && system?.audio_listener_ports) {
+      defaults.port = Number(system.audio_listener_ports.split("-")[0]);
+    }
+    return defaults;
   }
 
   function changeType(next: string) {
     setType(next);
-    setValues(defaultsFor(direction, next));
+    setValues(newDefaults(next));
   }
 
   async function save(event: FormEvent) {
@@ -310,7 +322,12 @@ function Endpoints({
       setOpen(false);
       await api.load();
     } catch (cause) {
-      api.setError(errorMessage(cause));
+      const message = errorMessage(cause);
+      if (message.startsWith("Configuration was saved but")) {
+        setOpen(false);
+        await api.load();
+      }
+      api.setError(message);
     } finally {
       api.setBusy(false);
     }
@@ -322,7 +339,9 @@ function Endpoints({
       await apiRequest(`/station/config/${kind}/${resource.id}`, { method: "DELETE", headers: api.headers() });
       await api.load();
     } catch (cause) {
-      api.setError(errorMessage(cause));
+      const message = errorMessage(cause);
+      if (message.startsWith("Configuration was deleted but")) await api.load();
+      api.setError(message);
     }
   }
 
@@ -355,6 +374,9 @@ function Endpoints({
       {open && (
         <form onSubmit={save} className="form">
           <h3>{editing ? "Edit" : "New"} {scope === "automation" ? "automation input" : direction}</h3>
+          {system?.audio_listener_ports && (type === "rtp" && direction === "input" || type === "srt" && values.mode === "listener") && (
+            <p>Listener ports for this station: {system.audio_listener_ports}. Destination ports for outgoing connections are not restricted.</p>
+          )}
           <label>
             <span className="label">Name</span>
             <input value={name} maxLength={100} required onChange={(event) => setName(event.target.value)} />
@@ -373,7 +395,7 @@ function Endpoints({
                 <span className="label">{spec.label}</span>
                 {spec.source === "nic" ? (
                   <select value={String(values[spec.key] ?? "")} onChange={(event) => setValues({ ...values, [spec.key]: event.target.value })}>
-                    <option value="">Default (system routing)</option>
+                    <option value="">{system?.default_audio_address ? `Default audio network (${system.default_audio_address})` : "Default (system routing)"}</option>
                     {(system?.network_interfaces ?? []).map((nic) => (
                       <option key={nic.name} value={nic.name}>{nic.name}{nic.addresses.length > 0 ? ` — ${nic.addresses.join(", ")}` : ""} ({nic.state})</option>
                     ))}
@@ -445,10 +467,10 @@ function summary(config: Cfg): string {
   return parts.join(" · ");
 }
 
-function NicSelect({ value, onChange, interfaces }: { value: string; onChange: (value: string) => void; interfaces: SystemDevices["network_interfaces"] }) {
+function NicSelect({ value, onChange, interfaces, defaultAddress }: { value: string; onChange: (value: string) => void; interfaces: SystemDevices["network_interfaces"]; defaultAddress?: string | null }) {
   return (
     <select value={value} onChange={(event) => onChange(event.target.value)}>
-      <option value="">Default (system routing)</option>
+      <option value="">{defaultAddress ? `Default data network (${defaultAddress})` : "Default (system routing)"}</option>
       {interfaces.map((nic) => (
         <option key={nic.name} value={nic.name}>{nic.name}{nic.addresses.length > 0 ? ` — ${nic.addresses.join(", ")}` : ""} ({nic.state})</option>
       ))}
@@ -460,17 +482,18 @@ function NicSelect({ value, onChange, interfaces }: { value: string; onChange: (
 type MetadataStatus = { id: string; connections: number; bytes: number; error: string | null };
 
 function Metadata({ config, api, apiKey }: { config: StationConfig; api: Api; apiKey: string }) {
-  const interfaces = usePolling<SystemDevices>("/audio/system/devices", apiKey, 15000).data?.network_interfaces ?? [];
+  const system = usePolling<SystemDevices>("/audio/system/devices", apiKey, 15000).data;
+  const interfaces = system?.network_interfaces ?? [];
   const status = usePolling<MetadataStatus[]>("/audio/metadata", apiKey, 3000).data ?? [];
   return (
     <>
-      <MetadataCard direction="input" config={config} api={api} interfaces={interfaces} status={status} />
-      <MetadataCard direction="output" config={config} api={api} interfaces={interfaces} status={status} />
+      <MetadataCard direction="input" config={config} api={api} interfaces={interfaces} defaultAddress={system?.default_metadata_address} listenerPorts={system?.metadata_listener_ports} status={status} />
+      <MetadataCard direction="output" config={config} api={api} interfaces={interfaces} defaultAddress={system?.default_metadata_address} listenerPorts={system?.metadata_listener_ports} status={status} />
     </>
   );
 }
 
-function MetadataCard({ direction, config, api, interfaces, status }: { direction: "input" | "output"; config: StationConfig; api: Api; interfaces: SystemDevices["network_interfaces"]; status: MetadataStatus[] }) {
+function MetadataCard({ direction, config, api, interfaces, defaultAddress, listenerPorts, status }: { direction: "input" | "output"; config: StationConfig; api: Api; interfaces: SystemDevices["network_interfaces"]; defaultAddress?: string | null; listenerPorts?: string | null; status: MetadataStatus[] }) {
   const existing = config.metadata.find((item) => item.direction === direction) ?? null;
   const [mode, setMode] = useState("server");
   const [host, setHost] = useState("");
@@ -513,7 +536,9 @@ function MetadataCard({ direction, config, api, interfaces, status }: { directio
       });
       await api.load();
     } catch (cause) {
-      api.setError(errorMessage(cause));
+      const message = errorMessage(cause);
+      if (message.startsWith("Configuration was saved but")) await api.load();
+      api.setError(message);
     } finally {
       api.setBusy(false);
     }
@@ -525,7 +550,9 @@ function MetadataCard({ direction, config, api, interfaces, status }: { directio
       await apiRequest(`/station/config/metadata/${existing.id}`, { method: "DELETE", headers: api.headers() });
       await api.load();
     } catch (cause) {
-      api.setError(errorMessage(cause));
+      const message = errorMessage(cause);
+      if (message.startsWith("Configuration was deleted but")) await api.load();
+      api.setError(message);
     }
   }
 
@@ -555,8 +582,9 @@ function MetadataCard({ direction, config, api, interfaces, status }: { directio
         </div>
         <label>
           <span className="label">Network interface</span>
-          <NicSelect value={nic} onChange={setNic} interfaces={interfaces} />
+          <NicSelect value={nic} onChange={setNic} interfaces={interfaces} defaultAddress={defaultAddress} />
         </label>
+        {mode === "server" && listenerPorts && <p>Listener ports for this station: {listenerPorts}.</p>}
         <label className="check"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /> Enabled</label>
         {direction === "output" && (
           <label className="check"><input type="checkbox" checked={delayed} onChange={(event) => setDelayed(event.target.checked)} /> Delay with the program audio</label>

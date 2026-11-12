@@ -1,4 +1,4 @@
-use std::{env, fs, path::Path};
+use std::{env, ffi::CStr, fs, net::Ipv4Addr, path::Path};
 
 use serde::Serialize;
 
@@ -19,6 +19,10 @@ pub struct AlsaDevice {
 #[derive(Serialize)]
 pub struct SystemDevices {
     pub network_interfaces: Vec<NetworkInterface>,
+    pub default_audio_address: Option<String>,
+    pub default_metadata_address: Option<String>,
+    pub audio_listener_ports: Option<String>,
+    pub metadata_listener_ports: Option<String>,
     pub alsa_inputs: Vec<AlsaDevice>,
     pub alsa_outputs: Vec<AlsaDevice>,
 }
@@ -27,6 +31,10 @@ pub fn discover() -> SystemDevices {
     let (alsa_inputs, alsa_outputs) = alsa_devices();
     SystemDevices {
         network_interfaces: network_interfaces(),
+        default_audio_address: crate::network::default_address("AUDIO_BIND"),
+        default_metadata_address: crate::network::default_address("METADATA_BIND"),
+        audio_listener_ports: crate::network::default_address("ENGINE_UDP_PORTS"),
+        metadata_listener_ports: crate::network::default_address("METADATA_TCP_PORTS"),
         alsa_inputs,
         alsa_outputs,
     }
@@ -39,11 +47,28 @@ pub fn interface_ipv4(name: &str) -> Option<String> {
         .and_then(|interface| interface.addresses.into_iter().next())
 }
 
+pub fn interface_for_ipv4(address: &str) -> Option<String> {
+    network_interfaces()
+        .into_iter()
+        .find(|interface| interface.addresses.iter().any(|ip| ip == address))
+        .map(|interface| interface.name)
+}
+
 fn network_interfaces() -> Vec<NetworkInterface> {
-    let Ok(entries) = fs::read_dir("/sys/class/net") else {
-        return Vec::new();
+    let entries = match fs::read_dir("/sys/class/net") {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::error!(%error, "could not enumerate network interfaces");
+            return Vec::new();
+        }
     };
-    let addresses = ipv4_addresses();
+    let addresses = match ipv4_addresses() {
+        Ok(addresses) => addresses,
+        Err(error) => {
+            tracing::error!(%error, "could not enumerate network interface addresses");
+            Vec::new()
+        }
+    };
     let mut interfaces: Vec<NetworkInterface> = entries
         .filter_map(Result::ok)
         .map(|entry| {
@@ -67,64 +92,36 @@ fn network_interfaces() -> Vec<NetworkInterface> {
     interfaces
 }
 
-// /proc/net/fib_trie lists local addresses but not their owners, so pair them using /proc/net/route.
-fn ipv4_addresses() -> Vec<(String, String)> {
-    let Ok(output) = fs::read_to_string("/proc/net/fib_trie") else {
-        return Vec::new();
-    };
-    let local: Vec<String> = {
-        let mut found = Vec::new();
-        let mut previous = String::new();
-        for line in output.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("/32 host LOCAL") {
-                if let Some(address) = previous.split_whitespace().last() {
-                    if !found.contains(&address.to_owned()) {
-                        found.push(address.to_owned());
-                    }
-                }
-            }
-            if let Some(rest) = trimmed.strip_prefix("|-- ") {
-                previous = rest.to_owned();
-            }
-        }
-        found
-    };
-    let Ok(routes) = fs::read_to_string("/proc/net/route") else {
-        return Vec::new();
-    };
+fn ipv4_addresses() -> std::io::Result<Vec<(String, String)>> {
+    let mut list = std::ptr::null_mut();
+    // getifaddrs owns the linked list until freeifaddrs is called.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     let mut pairs = Vec::new();
-    for address in local {
-        if address.starts_with("127.") {
-            pairs.push(("lo".to_owned(), address));
-            continue;
-        }
-        let octets: Vec<u32> = address
-            .split('.')
-            .filter_map(|part| part.parse().ok())
-            .collect();
-        if octets.len() != 4 {
-            continue;
-        }
-        let value = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);
-        for line in routes.lines().skip(1) {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 8 {
-                continue;
+    let mut current = list;
+    while !current.is_null() {
+        // The pointers are supplied by getifaddrs and remain valid until freeifaddrs.
+        unsafe {
+            let entry = &*current;
+            if !entry.ifa_addr.is_null()
+                && !entry.ifa_name.is_null()
+                && (*entry.ifa_addr).sa_family as i32 == libc::AF_INET
+            {
+                let address = &*(entry.ifa_addr as *const libc::sockaddr_in);
+                let ip = Ipv4Addr::from(address.sin_addr.s_addr.to_ne_bytes());
+                let name = CStr::from_ptr(entry.ifa_name)
+                    .to_string_lossy()
+                    .into_owned();
+                pairs.push((name, ip.to_string()));
             }
-            let (Ok(destination), Ok(mask)) = (
-                u32::from_str_radix(fields[1], 16),
-                u32::from_str_radix(fields[7], 16),
-            ) else {
-                continue;
-            };
-            if destination != 0 && value & mask == destination {
-                pairs.push((fields[0].to_owned(), address.clone()));
-                break;
-            }
+            current = entry.ifa_next;
         }
     }
-    pairs
+    unsafe { libc::freeifaddrs(list) };
+    pairs.sort();
+    pairs.dedup();
+    Ok(pairs)
 }
 
 fn alsa_devices() -> (Vec<AlsaDevice>, Vec<AlsaDevice>) {
@@ -178,7 +175,15 @@ fn parse_alsa_devices(pcm: &str) -> (Vec<AlsaDevice>, Vec<AlsaDevice>) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_alsa_devices;
+    use super::{ipv4_addresses, parse_alsa_devices};
+
+    #[test]
+    fn discovers_loopback_address_on_its_interface() {
+        let addresses = ipv4_addresses().expect("getifaddrs failed");
+        assert!(addresses
+            .iter()
+            .any(|(name, address)| name == "lo" && address == "127.0.0.1"));
+    }
 
     #[test]
     fn discovers_loopback_capture_and_playback_devices() {

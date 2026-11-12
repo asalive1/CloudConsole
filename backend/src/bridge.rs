@@ -25,11 +25,12 @@ enum Bus {
 }
 
 impl Bus {
-    fn listen_port(self) -> u16 {
-        match self {
+    fn listen_port(self, slot: Option<u16>) -> u16 {
+        let base = match self {
             Bus::Program => PROGRAM_LISTEN_PORT,
             Bus::Cue => CUE_LISTEN_PORT,
-        }
+        };
+        base + slot.unwrap_or(0) * 2
     }
 
     fn display(self) -> &'static str {
@@ -72,7 +73,11 @@ async fn run_bus(state: AppState, bus: Bus) {
 
 async fn session(state: &AppState, bus: Bus) -> Result<(), String> {
     let base = state.janus_http_url.trim_end_matches('/').to_owned();
-    let engine_ip = resolve(&state.audio_engine_url).await?;
+    let engine_ip = if state.engine_host_network_slot.is_some() {
+        docker_gateway()?
+    } else {
+        resolve(&state.audio_engine_url).await?
+    };
     let janus_ip = resolve(&base).await?;
     let room = bus.room(state);
 
@@ -109,7 +114,7 @@ async fn session(state: &AppState, bus: Bus) -> Result<(), String> {
                 "pin": state.janus_room_pin,
                 "display": bus.display(),
                 "codec": "opus",
-                "rtp": { "ip": engine_ip.to_string(), "port": bus.listen_port(), "payload_type": PAYLOAD_TYPE }
+                "rtp": { "ip": engine_ip.to_string(), "port": bus.listen_port(state.engine_host_network_slot), "payload_type": PAYLOAD_TYPE }
             }
         }),
     )
@@ -118,7 +123,7 @@ async fn session(state: &AppState, bus: Bus) -> Result<(), String> {
     let mut target = joined_target(&joined);
     loop {
         if let Some((port, payload_type)) = target {
-            ensure_engine_bridge(state, bus, janus_ip, port, payload_type).await?;
+            ensure_engine_bridge(state, bus, engine_ip, janus_ip, port, payload_type).await?;
         }
         let event = poll(state, &session_url).await?;
         if let Some(found) = joined_target(&event) {
@@ -166,6 +171,7 @@ fn joined_target(response: &Value) -> Option<(u16, u8)> {
 async fn ensure_engine_bridge(
     state: &AppState,
     bus: Bus,
+    engine_ip: IpAddr,
     janus_ip: IpAddr,
     port: u16,
     payload_type: u8,
@@ -185,14 +191,24 @@ async fn ensure_engine_bridge(
         .await
         .map_err(|error| error.to_string())?;
     let expected = format!("{janus_ip}:{port}");
-    if status["active"] == true && status["remote"] == expected.as_str() {
+    let listen_address = if state.engine_host_network_slot.is_some() {
+        engine_ip.to_string()
+    } else {
+        "0.0.0.0".to_owned()
+    };
+    if status["active"] == true
+        && status["remote"] == expected.as_str()
+        && status["listen_address"] == listen_address.as_str()
+        && status["listen_port"] == bus.listen_port(state.engine_host_network_slot)
+    {
         return Ok(());
     }
     let response = state
         .http_client
         .put(&url)
         .json(&json!({
-            "listen_port": bus.listen_port(),
+            "listen_port": bus.listen_port(state.engine_host_network_slot),
+            "listen_address": listen_address,
             "remote_host": janus_ip.to_string(),
             "remote_port": port,
             "payload_type": payload_type,
@@ -208,6 +224,66 @@ async fn ensure_engine_bridge(
             "engine rejected the bridge ({})",
             response.status()
         ))
+    }
+}
+
+fn docker_gateway() -> Result<IpAddr, String> {
+    let routes = std::fs::read_to_string("/proc/net/route")
+        .map_err(|error| format!("could not read container routes: {error}"))?;
+    parse_default_gateway(&routes)
+}
+
+fn parse_default_gateway(routes: &str) -> Result<IpAddr, String> {
+    for line in routes.lines().skip(1) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() >= 4 && fields[1] == "00000000" {
+            let flags = u32::from_str_radix(fields[3], 16)
+                .map_err(|error| format!("invalid route flags: {error}"))?;
+            if flags & 2 == 0 {
+                continue;
+            }
+            let gateway = u32::from_str_radix(fields[2], 16)
+                .map_err(|error| format!("invalid gateway address: {error}"))?;
+            if gateway != 0 {
+                return Ok(std::net::Ipv4Addr::from(gateway.to_ne_bytes()).into());
+            }
+        }
+    }
+    Err("container has no IPv4 default gateway for the audio bridge".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovers_bridge_gateway_and_requires_a_gateway_route() {
+        let routes = "Iface Destination Gateway Flags RefCnt Use Metric Mask\n\
+                      eth0 00000000 010013AC 0003 0 0 0 00000000\n";
+        assert_eq!(
+            parse_default_gateway(routes).unwrap(),
+            "172.19.0.1".parse::<IpAddr>().unwrap()
+        );
+        assert!(parse_default_gateway(
+            "Iface Destination Gateway Flags\neth0 00000000 00000000 0001"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn assigns_non_overlapping_bridge_ports_to_four_slots() {
+        let ports: Vec<_> = (0..4)
+            .flat_map(|slot| {
+                [
+                    Bus::Program.listen_port(Some(slot)),
+                    Bus::Cue.listen_port(Some(slot)),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            ports,
+            vec![10500, 10501, 10502, 10503, 10504, 10505, 10506, 10507]
+        );
     }
 }
 

@@ -15,8 +15,54 @@ Files: [docker-compose.local.yml](../docker-compose.local.yml) (pins ports to a 
 together with `docker-compose.yml` and `docker-compose.prod.yml`) and the helper scripts in
 `deploy/local/`.
 
-> Status: the overlay and scripts were validated with `docker compose config` and a script
-> test in a Linux container. They have not yet been run on your server.
+## Selecting host audio and data interfaces
+
+On native Linux, new stations use host networking for the audio engine so the interface
+drop-downs list the server's real interfaces and addresses. Select the appropriate interface
+for each RTP or SRT input/output and each TCP metadata endpoint. With no explicit selection,
+audio uses `AUDIO_BIND` and metadata uses `METADATA_BIND`. The web UI and browser media
+remain bound to `DATA_BIND`. Change these addresses in the station's `.env` file and
+recreate the services if the server addresses change. All must be assigned to the host.
+The host routing table and firewall must also permit traffic to the chosen destination;
+selecting a source interface does not create routes.
+
+Existing stations retain their previous Docker bridge networking until migrated. Before
+migration, record existing network input and metadata settings, verify their listener
+ports are within the station's configured ranges, and replace any saved container-only
+interface such as `eth0` with the correct host interface. Host-mode audio RTP/SRT listeners
+are restricted to `ENGINE_UDP_PORTS`, and TCP metadata listeners to `METADATA_TCP_PORTS`.
+These limits do not restrict remote destination ports for outgoing RTP, SRT callers, or
+metadata clients. A failed configuration is saved but reported as not applied; correct
+the saved item and try again. Confirm the engine logs if a pipeline later fails.
+
+For an existing station, add `HOST_AUDIO_NETWORK=true` to its local `.env`, then run
+`./deploy/local/station.sh <name> up`. This recreates services and briefly interrupts audio.
+The wrapper continues to include any station-specific ALSA overlay. To roll back, first
+stop and remove the host-mode proxy, then remove `HOST_AUDIO_NETWORK=true` and run the
+same command. For example, for station `wxyz`:
+
+```bash
+docker compose -p cc-wxyz --env-file deploy/local/stations/wxyz.env \
+  -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.local.yml \
+  -f docker-compose.host-audio.yml stop engine-proxy
+docker compose -p cc-wxyz --env-file deploy/local/stations/wxyz.env \
+  -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.local.yml \
+  -f docker-compose.host-audio.yml rm -f engine-proxy
+```
+
+Saved host interface names may need to be updated for bridge networking. Avoid direct
+Compose lifecycle commands unless they include
+`docker-compose.host-audio.yml` after the local overlay.
+
+Host networking bypasses Docker's published-port firewall for the engine: protect the
+audio and data NICs with host/network firewall rules, and only open required station
+listener ports to trusted peers. Multicast requires network and switch support. The
+unauthenticated engine control API uses a root-only Unix socket in a per-station Docker
+volume; a proxy exposes it only to that station's Docker network. Only trusted containers
+should be attached to that network, and Docker administrators have access. The Janus
+bridge binds the station Docker network's gateway and uses UDP ports 10500-10507 (two
+per slot); these are internal bridge ports, not published on the physical NICs.
+Docker Desktop is not equivalent to native Linux for host networking.
 
 ## Quick answers
 

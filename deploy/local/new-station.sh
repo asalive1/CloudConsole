@@ -57,6 +57,7 @@ umask 077
 cat > "$env_file" <<EOF
 STATION_NAME=$name
 STATION_SLOT=$slot
+HOST_AUDIO_NETWORK=true
 STATION_ID=$(cat /proc/sys/kernel/random/uuid)
 STATION_API_KEY=$(secret 24)
 GUEST_JWT_SECRET=$(secret 32)

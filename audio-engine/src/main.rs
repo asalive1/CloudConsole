@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 mod metadata;
+mod network;
 mod pipeline;
 mod system;
 
@@ -122,12 +123,24 @@ struct SourceMixRequest {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if env::args().nth(1).as_deref() == Some("--socket-health") {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut socket = tokio::net::UnixStream::connect("/run/cloudconsole/engine.sock").await?;
+        socket.write_all(b"GET /health HTTP/1.0\r\n\r\n").await?;
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).await?;
+        if !response.starts_with(b"HTTP/1.1 200") && !response.starts_with(b"HTTP/1.0 200") {
+            return Err("engine health check failed".into());
+        }
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
     gst::init()?;
+    network::validate_configuration().map_err(|error| format!("network configuration: {error}"))?;
 
     let engine = AudioEngine::new()
         .map_err(|error| format!("audio engine initialization failed: {error}"))?;
@@ -167,6 +180,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/outputs/{id}", delete(remove_output))
         .with_state(state);
 
+    if network::host_mode() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let dir = "/run/cloudconsole";
+        std::fs::create_dir_all(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        let path = "/run/cloudconsole/engine.sock";
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path)?,
+            Ok(_) => return Err(format!("{path} exists and is not a socket").into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let listener = tokio::net::UnixListener::bind(path)?;
+        tracing::info!("Cloud Console audio engine listening on private Unix socket {path}");
+        axum::serve(listener, app).await?;
+        return Ok(());
+    }
     let address = env::var("BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8001".to_owned());
     let listener = tokio::net::TcpListener::bind(address.parse::<SocketAddr>()?).await?;
     tracing::info!(

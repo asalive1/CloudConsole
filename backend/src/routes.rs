@@ -40,6 +40,10 @@ pub enum ApiError {
     Janus(String),
     #[error("audio engine rejected the delay request: {0}")]
     AudioEngineMessage(String),
+    #[error("configuration saved but not applied: {0}")]
+    SavedButNotApplied(String),
+    #[error("configuration deleted but not applied: {0}")]
+    DeletedButNotApplied(String),
 }
 
 impl IntoResponse for ApiError {
@@ -82,6 +86,20 @@ impl IntoResponse for ApiError {
                 (
                     StatusCode::BAD_GATEWAY,
                     "audio delay engine is unavailable".to_owned(),
+                )
+            }
+            ApiError::SavedButNotApplied(error) => {
+                tracing::warn!(%error, "saved configuration was not applied");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Configuration was saved but could not be applied: {error}. Edit the saved item to correct it."),
+                )
+            }
+            ApiError::DeletedButNotApplied(error) => {
+                tracing::warn!(%error, "deleted configuration was not removed from the engine");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Configuration was deleted but the engine could not apply the deletion: {error}. It will retry automatically."),
                 )
             }
         };
@@ -736,7 +754,9 @@ pub async fn create_station_resource(
         }
         _ => return Err(ApiError::NotFound),
     }
-    sync_engine_resource(&state, &kind, id, false).await;
+    sync_engine_resource(&state, &kind, id, false)
+        .await
+        .map_err(ApiError::SavedButNotApplied)?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
@@ -819,27 +839,33 @@ pub async fn update_station_resource(
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    sync_engine_resource(&state, &kind, id, false).await;
+    sync_engine_resource(&state, &kind, id, false)
+        .await
+        .map_err(ApiError::SavedButNotApplied)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn sync_engine_resource(state: &AppState, kind: &str, id: Uuid, removed: bool) {
+async fn sync_engine_resource(
+    state: &AppState,
+    kind: &str,
+    id: Uuid,
+    removed: bool,
+) -> Result<(), String> {
     if kind == "metadata" {
-        if let Err(error) = crate::engine_sync::apply_metadata(state).await {
-            tracing::warn!(%error, "audio engine did not accept the metadata configuration yet");
-        }
-        return;
+        return crate::engine_sync::apply_metadata(state).await;
     }
     let result = match (kind, removed) {
         ("inputs", false) => crate::engine_sync::apply_input(state, id).await,
         ("inputs", true) => crate::engine_sync::remove_input(state, id).await,
         ("outputs", false) => crate::engine_sync::apply_output(state, id).await,
         ("outputs", true) => crate::engine_sync::remove_output(state, id).await,
-        _ => return,
+        _ => return Ok(()),
     };
     if let Err(error) = result {
         tracing::warn!(kind, %id, %error, "audio engine did not accept the configuration yet");
+        return Err(error);
     }
+    Ok(())
 }
 
 pub async fn delete_station_resource(
@@ -864,7 +890,7 @@ pub async fn delete_station_resource(
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    sync_engine_resource(&state, &kind, id, true).await;
+    let sync_result = sync_engine_resource(&state, &kind, id, true).await;
     if kind == "inputs" {
         sqlx::query("DELETE FROM mixer_channel_state WHERE station_id = $1 AND channel_id = $2")
             .bind(state.station_id)
@@ -872,6 +898,7 @@ pub async fn delete_station_resource(
             .execute(&state.pool)
             .await?;
     }
+    sync_result.map_err(ApiError::DeletedButNotApplied)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
