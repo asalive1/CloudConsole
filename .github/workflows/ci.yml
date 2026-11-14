@@ -38,6 +38,7 @@ jobs:
       - run: cargo fmt --manifest-path backend/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo test --manifest-path backend/Cargo.toml --locked
+      - run: bash deploy/local/test-mixer-websocket.sh
 
   audio-engine:
     runs-on: ubuntu-latest
@@ -57,6 +58,7 @@ jobs:
       - run: cargo clippy --manifest-path audio-engine/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo test --manifest-path audio-engine/Cargo.toml --locked
       - run: bash deploy/local/test-station-ports.sh
+      - run: bash deploy/local/test-cc-support.sh
 
   containers:
     runs-on: ubuntu-latest

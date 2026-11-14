@@ -1656,7 +1656,26 @@ async fn handle_mixer_websocket(
         }
     }
     loop {
-        match updates.recv().await {
+        let update = tokio::select! {
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Close(_))) => {
+                        // Drive tungstenite's queued close reply before dropping the socket.
+                        if tokio::time::timeout(std::time::Duration::from_secs(2), socket.recv())
+                            .await
+                            .is_err()
+                        {
+                            tracing::debug!("mixer websocket close handshake timed out");
+                        }
+                        break;
+                    }
+                    None | Some(Err(_)) => break,
+                    Some(Ok(_)) => continue,
+                }
+            }
+            update = updates.recv() => update,
+        };
+        match update {
             Ok(channel) => {
                 if participant_id.is_some()
                     && channel["channel_id"].as_str()

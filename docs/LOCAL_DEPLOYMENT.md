@@ -353,8 +353,10 @@ Inspect host playback with `cat /proc/asound/pcm` and
 `cat /proc/asound/card*/pcm*p/sub*/hw_params` while audio is playing. ALSA
 loopback typically sends playback device 0 to capture device 1, or playback 1 to
 capture 0, on the same card and subdevice. For example, playback `hw:0,0,3`
-would use capture `hw:0,1,3`. The list shows card/device pairs, not individual
-subdevices: enter the full identifier manually when needed. Match the playback
+would use capture `hw:0,1,3`. The list includes card/device pairs and individual
+subdevices when more than one is reported by the host. A listed device is not
+necessarily available or receiving audio. The list does not include ALSA
+configuration aliases. Match the playback
 rate, channels, and sample format; raw `hw:` does not convert formats. Confirm
 that a source opens and its meter moves, and review `station.sh <name> logs audio-engine`
 and backend logs if it does not.
@@ -368,6 +370,27 @@ deploy/local/station.sh wxyz restart
 deploy/local/station.sh wxyz down            # stop (data kept)
 deploy/local/station.sh wxyz backup          # pg_dump to deploy/local/backups/
 ```
+
+For diagnostics, collect support data **before** restarting a stalled station:
+
+```bash
+bash deploy/local/cc-support.sh linux-s2
+```
+
+The archive is written to `/srv/wo/cs/support` by default. Change the
+`support_dir` default in the script, set `CC_SUPPORT_DIR`, or pass an absolute
+directory as the second argument. The directory must be writable by the user
+running the script, who must also have Docker access. The archive is private to
+that user and contains logs for all currently existing station containers,
+including stopped ones, and a consistent PostgreSQL logical backup. It also
+includes files under `/var/log/CloudConsole/<station>` if that directory exists.
+Docker controls its own log storage and retention; this command cannot recover
+logs already rotated or containers already removed. It does not configure
+ongoing logging to `/var/log/CloudConsole`.
+
+The database and logs may contain credentials and other sensitive data. Store
+the archive securely and review it before sharing. A nonzero exit means
+collection was incomplete; inspect `collection-status.txt` inside the archive.
 
 Update: `git pull`, then `deploy/local/station.sh <name> up` for each station.
 

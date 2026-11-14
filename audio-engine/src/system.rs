@@ -158,16 +158,31 @@ fn parse_alsa_devices(pcm: &str) -> (Vec<AlsaDevice>, Vec<AlsaDevice>) {
             continue;
         };
         let description = parts.get(1).copied().unwrap_or("").trim().to_owned();
-        let make = || AlsaDevice {
-            device: format!("hw:{card},{device}"),
-            name: name.trim().to_owned(),
-            description: description.clone(),
-        };
-        if parts.iter().any(|part| part.trim().starts_with("capture")) {
-            inputs.push(make());
-        }
-        if parts.iter().any(|part| part.trim().starts_with("playback")) {
-            outputs.push(make());
+        for (direction, devices) in [("capture", &mut inputs), ("playback", &mut outputs)] {
+            let count = parts.iter().find_map(|part| {
+                let mut words = part.split_whitespace();
+                if words.next()? != direction {
+                    return None;
+                }
+                words.next()?.parse::<u32>().ok()
+            });
+            let Some(count) = count.filter(|count| *count > 0) else {
+                continue;
+            };
+            devices.push(AlsaDevice {
+                device: format!("hw:{card},{device}"),
+                name: name.trim().to_owned(),
+                description: description.clone(),
+            });
+            if count > 1 {
+                for subdevice in 0..count {
+                    devices.push(AlsaDevice {
+                        device: format!("hw:{card},{device},{subdevice}"),
+                        name: format!("{} (subdevice {subdevice})", name.trim()),
+                        description: description.clone(),
+                    });
+                }
+            }
         }
     }
     (inputs, outputs)
@@ -191,17 +206,16 @@ mod tests {
                    00-01: Loopback PCM : Loopback PCM : playback 8 : capture 8\n\
                    04-00: Generic Analog : Generic Analog : playback 1 : capture 1\n";
         let (inputs, outputs) = parse_alsa_devices(pcm);
-        assert_eq!(
-            inputs.iter().map(|d| d.device.as_str()).collect::<Vec<_>>(),
-            ["hw:0,0", "hw:0,1", "hw:4,0"]
-        );
-        assert_eq!(
-            outputs
-                .iter()
-                .map(|d| d.device.as_str())
-                .collect::<Vec<_>>(),
-            ["hw:0,0", "hw:0,1", "hw:4,0"]
-        );
+        for devices in [&inputs, &outputs] {
+            let actual: Vec<_> = devices.iter().map(|d| d.device.as_str()).collect();
+            assert_eq!(actual.len(), 19);
+            assert_eq!(actual[0], "hw:0,0");
+            assert_eq!(actual[1], "hw:0,0,0");
+            assert_eq!(actual[8], "hw:0,0,7");
+            assert_eq!(actual[9], "hw:0,1");
+            assert_eq!(actual[17], "hw:0,1,7");
+            assert_eq!(actual[18], "hw:4,0");
+        }
     }
 
     #[test]
@@ -213,5 +227,17 @@ mod tests {
         assert_eq!(inputs[0].device, "hw:1,0");
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].device, "hw:2,3");
+    }
+
+    #[test]
+    fn uses_direction_specific_subdevice_counts() {
+        let (inputs, outputs) = parse_alsa_devices(
+            "00-00: Loopback : Loopback : playback 2 : capture 3\n\
+             01-00: Invalid : Invalid : playback nope : capture 0\n",
+        );
+        assert_eq!(inputs.len(), 4);
+        assert_eq!(inputs[3].device, "hw:0,0,2");
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2].device, "hw:0,0,1");
     }
 }
