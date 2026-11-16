@@ -3,6 +3,7 @@ import Janus, { type JanusJS } from "janus-gateway";
 import adapter from "webrtc-adapter";
 import { API_BASE, type MixerChannel, type Participant } from "./api";
 import { queueConnectionReport } from "./connectionReport";
+import { mergeMixerUpdate, type MixerChannelUpdate } from "./mixerUpdates";
 import { roomMix } from "./liveMix";
 
 type Bus = "program" | "cue";
@@ -146,7 +147,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
         const response = await fetch(`${API_BASE}/live-sessions/${session.session_id}/connection`, {
           method: "PATCH",
           headers: { ...authorization, "Content-Type": "application/json" },
-          body: JSON.stringify({ state }),
+          body: JSON.stringify({ state, mic_active: state === "connected" && mode === "live" }),
           signal: AbortSignal.timeout(5000),
           keepalive: true,
         });
@@ -208,11 +209,13 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
         const message = JSON.parse(event.data) as {
           type: "snapshot" | "update";
           channels?: MixerChannel[];
-          channel?: MixerChannel;
+          channel?: MixerChannelUpdate;
         };
-        const next = message.type === "update" ? (message.channel ? [message.channel] : []) : message.channels ?? [];
-        const own = next.find((item) => item.channel_id === session.session_id);
-        if (own && own.revision >= (channelRef.current?.revision ?? 0)) {
+        const previous = channelRef.current;
+        const own = message.type === "update"
+          ? previous && message.channel ? mergeMixerUpdate(previous, message.channel) : null
+          : (message.channels ?? []).find((item) => item.channel_id === session.session_id) ?? null;
+        if (own && own.revision >= (previous?.revision ?? 0)) {
           channelRef.current = own;
           setChannel(own);
         }

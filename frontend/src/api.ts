@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { mergeMixerUpdate, type MixerChannelUpdate } from "./mixerUpdates";
 
 export const API_BASE = "/api";
 export const STATION_KEY = "cloud-console-station-key";
@@ -28,6 +29,7 @@ export type LiveSession = {
   display_name: string;
   role: string;
   status: string;
+  mic_active: boolean;
   expires_at: string;
 };
 
@@ -170,17 +172,14 @@ export function useMixerChannels(apiKey: string): { channels: MixerChannel[]; er
         const message = JSON.parse(event.data) as {
           type: "snapshot" | "update";
           channels?: MixerChannel[];
-          channel?: MixerChannel;
+          channel?: MixerChannelUpdate;
         };
         if (message.type === "snapshot") {
           const snapshot = message.channels ?? [];
           setChannels((current) => mergeMixerSnapshot(current, snapshot));
         } else if (message.channel) {
           const updated = message.channel;
-          setChannels((current) => current.some((item) => item.channel_id === updated.channel_id)
-            ? current.map((item) => item.channel_id === updated.channel_id && updated.revision >= item.revision ? updated : item)
-            : [...current, updated],
-          );
+          setChannels((current) => current.map((item) => mergeMixerUpdate(item, updated)));
         }
       };
       socket.onerror = () => {

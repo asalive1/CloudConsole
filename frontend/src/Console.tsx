@@ -163,7 +163,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
 
   const ownId = participant?.session_id;
   const sources = orderInputs(channels.filter((channel) => channel.role === "automation" || channel.role === "aux"), inputOrder);
-  const connectedIds = new Set((sessions.data ?? []).filter((item) => item.status === "connected").map((item) => item.id));
+  const connectedIds = new Set((sessions.data ?? []).filter((item) => item.status === "connected" && item.mic_active).map((item) => item.id));
   const sessionNames = new Map((sessions.data ?? []).map((item) => [item.id, item.display_name]));
   const mics = channels
     .filter((channel) => channel.role !== "automation" && channel.role !== "aux" && channel.channel_id !== ownId && connectedIds.has(channel.channel_id))

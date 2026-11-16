@@ -1221,6 +1221,7 @@ pub struct LiveSessionResponse {
     display_name: String,
     role: String,
     status: String,
+    mic_active: bool,
     expires_at: DateTime<Utc>,
 }
 
@@ -1296,7 +1297,7 @@ pub async fn list_live_sessions(
     authorize_station(&headers, &state)?;
     expire_stale_sessions(&state).await?;
     let rows = sqlx::query(
-        "SELECT id, display_name, role, status, expires_at FROM sessions WHERE station_id = $1 AND (status = 'connected' OR id IN (SELECT id FROM sessions WHERE station_id = $1 AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 100)) ORDER BY created_at DESC",
+        "SELECT id, display_name, role, status, mic_active, expires_at FROM sessions WHERE station_id = $1 AND (status = 'connected' OR id IN (SELECT id FROM sessions WHERE station_id = $1 AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 100)) ORDER BY created_at DESC",
     )
     .bind(state.station_id)
     .fetch_all(&state.pool)
@@ -1308,6 +1309,7 @@ pub async fn list_live_sessions(
                 display_name: row.get("display_name"),
                 role: row.get("role"),
                 status: row.get("status"),
+                mic_active: row.get("mic_active"),
                 expires_at: row.get("expires_at"),
             })
             .collect(),
@@ -1322,7 +1324,7 @@ pub async fn approve_guest_session(
     authorize_station(&headers, &state)?;
     expire_stale_sessions(&state).await?;
     let row = sqlx::query(
-        "UPDATE sessions s SET status = 'approved', expires_at = gl.expires_at, approval_expires_at = NULL, updated_at = NOW() FROM guest_links gl WHERE s.id = $1 AND s.station_id = $2 AND s.guest_link_id = gl.id AND s.status = 'pending' AND s.approval_expires_at > NOW() AND gl.invalidated_at IS NULL AND gl.expires_at > NOW() RETURNING s.id, s.display_name, s.role, s.status, s.expires_at",
+        "UPDATE sessions s SET status = 'approved', expires_at = gl.expires_at, approval_expires_at = NULL, updated_at = NOW() FROM guest_links gl WHERE s.id = $1 AND s.station_id = $2 AND s.guest_link_id = gl.id AND s.status = 'pending' AND s.approval_expires_at > NOW() AND gl.invalidated_at IS NULL AND gl.expires_at > NOW() RETURNING s.id, s.display_name, s.role, s.status, s.mic_active, s.expires_at",
     )
     .bind(id)
     .bind(state.station_id)
@@ -1334,6 +1336,7 @@ pub async fn approve_guest_session(
         display_name: row.get("display_name"),
         role: row.get("role"),
         status: row.get("status"),
+        mic_active: row.get("mic_active"),
         expires_at: row.get("expires_at"),
     }))
 }
@@ -1346,7 +1349,7 @@ pub async fn reject_guest_session(
     authorize_station(&headers, &state)?;
     expire_stale_sessions(&state).await?;
     let row = sqlx::query(
-        "UPDATE sessions SET status = 'rejected', approval_expires_at = NULL, updated_at = NOW() WHERE id = $1 AND station_id = $2 AND role = 'guest' AND status = 'pending' RETURNING id, display_name, role, status, expires_at",
+        "UPDATE sessions SET status = 'rejected', mic_active = FALSE, approval_expires_at = NULL, updated_at = NOW() WHERE id = $1 AND station_id = $2 AND role = 'guest' AND status = 'pending' RETURNING id, display_name, role, status, mic_active, expires_at",
     )
     .bind(id)
     .bind(state.station_id)
@@ -1358,6 +1361,7 @@ pub async fn reject_guest_session(
         display_name: row.get("display_name"),
         role: row.get("role"),
         status: row.get("status"),
+        mic_active: row.get("mic_active"),
         expires_at: row.get("expires_at"),
     }))
 }
@@ -1371,7 +1375,7 @@ pub async fn disconnect_guest_session(
     expire_stale_sessions(&state).await?;
     let mut transaction = state.pool.begin().await?;
     let row = sqlx::query(
-        "UPDATE sessions SET status = 'rejected', approval_expires_at = NULL, updated_at = NOW() WHERE id = $1 AND station_id = $2 AND status IN ('approved', 'connected', 'disconnected') RETURNING id, display_name, role, status, expires_at",
+        "UPDATE sessions SET status = 'rejected', mic_active = FALSE, approval_expires_at = NULL, updated_at = NOW() WHERE id = $1 AND station_id = $2 AND status IN ('approved', 'connected', 'disconnected') RETURNING id, display_name, role, status, mic_active, expires_at",
     )
     .bind(id)
     .bind(state.station_id)
@@ -1399,6 +1403,7 @@ pub async fn disconnect_guest_session(
         display_name: row.get("display_name"),
         role: row.get("role"),
         status: row.get("status"),
+        mic_active: row.get("mic_active"),
         expires_at: row.get("expires_at"),
     }))
 }
@@ -1433,6 +1438,7 @@ pub async fn get_guest_session(
 #[derive(Deserialize)]
 pub struct ConnectionStateRequest {
     state: String,
+    mic_active: Option<bool>,
 }
 
 pub async fn get_live_connection(
@@ -1821,12 +1827,13 @@ pub async fn update_live_connection(
         }
     };
     let row = sqlx::query(
-        "UPDATE sessions s SET status = $1, updated_at = NOW() WHERE s.id = $2 AND s.station_id = $3 AND s.role = $4 AND s.status IN ('approved', 'connected', 'disconnected') AND s.expires_at > NOW() AND (s.guest_link_id IS NULL OR EXISTS (SELECT 1 FROM guest_links gl WHERE gl.id = s.guest_link_id AND gl.station_id = s.station_id AND gl.invalidated_at IS NULL AND gl.expires_at > NOW())) RETURNING s.id, s.display_name, s.role, s.status, s.expires_at",
+        "UPDATE sessions s SET status = $1, mic_active = $5, updated_at = NOW() WHERE s.id = $2 AND s.station_id = $3 AND s.role = $4 AND s.status IN ('approved', 'connected', 'disconnected') AND s.expires_at > NOW() AND (s.guest_link_id IS NULL OR EXISTS (SELECT 1 FROM guest_links gl WHERE gl.id = s.guest_link_id AND gl.station_id = s.station_id AND gl.invalidated_at IS NULL AND gl.expires_at > NOW())) RETURNING s.id, s.display_name, s.role, s.status, s.mic_active, s.expires_at",
     )
     .bind(status)
     .bind(id)
     .bind(state.station_id)
     .bind(&claims.role)
+    .bind(status == "connected" && request.mic_active.unwrap_or(claims.role == "guest"))
     .fetch_optional(&state.pool)
     .await?
     .ok_or(ApiError::Unauthorized)?;
@@ -1835,6 +1842,7 @@ pub async fn update_live_connection(
         display_name: row.get("display_name"),
         role: row.get("role"),
         status: row.get("status"),
+        mic_active: row.get("mic_active"),
         expires_at: row.get("expires_at"),
     }))
 }

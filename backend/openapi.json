@@ -88,12 +88,13 @@
       },
       "LiveSession": {
         "type": "object",
-        "required": ["id", "display_name", "role", "status", "expires_at"],
+        "required": ["id", "display_name", "role", "status", "mic_active", "expires_at"],
         "properties": {
           "id": { "type": "string", "format": "uuid" },
           "display_name": { "type": "string" },
           "role": { "type": "string", "enum": ["guest", "host", "co_host"] },
           "status": { "type": "string", "enum": ["pending", "approved", "connected", "disconnected", "rejected", "timed_out", "expired"] },
+          "mic_active": { "type": "boolean", "description": "Whether a connected participant has activated their microphone." },
           "expires_at": { "type": "string", "format": "date-time" }
         }
       },
@@ -136,7 +137,10 @@
       "ConnectionState": {
         "type": "object",
         "required": ["state"],
-        "properties": { "state": { "type": "string", "enum": ["connected", "disconnected"] } }
+        "properties": {
+          "state": { "type": "string", "enum": ["connected", "disconnected"] },
+          "mic_active": { "type": "boolean", "description": "True when the connected participant has activated their microphone. Defaults to false for hosts and true for guests if omitted." }
+        }
       },
       "StationConfig": {
         "type": "object",

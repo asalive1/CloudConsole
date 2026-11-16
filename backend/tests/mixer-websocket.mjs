@@ -75,6 +75,29 @@ assert.equal(sessions.length, 101);
 assert.ok(sessions.some((session) => session.id === "00000000-0000-0000-0000-000000000004" && session.status === "connected"),
   "older connected hosts must be included beyond the recent-session limit");
 
+const hostResponse = await fetch(`${base}/api/live-sessions`, {
+  method: "POST",
+  headers: { "X-API-Key": key, "Content-Type": "application/json" },
+  body: JSON.stringify({ display_name: "Test listener", role: "host" }),
+});
+assert.equal(hostResponse.status, 201);
+const host = await hostResponse.json();
+async function setConnection(state, mic_active) {
+  const result = await fetch(`${base}/api/live-sessions/${host.session_id}/connection`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${host.access_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ state, mic_active }),
+  });
+  assert.equal(result.status, 200);
+  return result.json();
+}
+assert.equal((await setConnection("connected", false)).mic_active, false);
+assert.equal((await setConnection("connected", true)).mic_active, true);
+assert.equal((await setConnection("disconnected", true)).mic_active, false);
+assert.equal((await setConnection("connected", true)).mic_active, true);
+const activeSessions = await (await fetch(`${base}/api/live-sessions`, { headers: { "X-API-Key": key } })).json();
+assert.equal(activeSessions.find((session) => session.id === host.session_id).mic_active, true);
+
 const ws = await connect();
 const update = new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error("Mixer update timed out")), 5000);
@@ -90,6 +113,19 @@ const message = await update;
 assert.equal(message.type, "update");
 assert.equal(message.channel.channel_id, id);
 assert.equal(message.channel.fader, 0.6);
+const dropUpdate = new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("Drop mixer update timed out")), 5000);
+  ws.onmessage = (event) => { clearTimeout(timer); resolve(JSON.parse(event.data)); };
+});
+const drop = await fetch(`${base}/api/live-sessions/${host.session_id}/disconnect`, {
+  method: "POST", headers: { "X-API-Key": key },
+});
+assert.equal(drop.status, 200);
+assert.equal((await drop.json()).mic_active, false);
+const dropped = await dropUpdate;
+assert.equal(dropped.channel.channel_id, host.session_id);
+assert.equal(dropped.channel.muted, true);
+assert.equal(dropped.channel.role, undefined);
 await close(ws);
 
 for (let i = 0; i < 100; i++) await close(await connect());

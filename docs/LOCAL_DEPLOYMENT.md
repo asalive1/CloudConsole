@@ -319,6 +319,10 @@ page. It asks for confirmation when audio is active because reloading
 temporarily disconnects the microphone and monitor audio. Audio stream
 statistics include approximate microphone levels; individual microphone
 jitter and packet loss are not currently available.
+Connected hosts who are listening without activating their microphone do not
+appear in the connected microphones list. Microphone activation is reported
+by the participant's browser; all browser clients should be refreshed after an
+upgrade so they report it correctly.
 
 A second station is simply `https://kabc.example.com/` forwarded to port 7003.
 
