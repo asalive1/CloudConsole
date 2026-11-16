@@ -132,6 +132,10 @@ input[type="range"] { width: 100%; }
 .switch input:focus-visible + .slider { outline: 2px solid var(--blue); }
 
 .settings summary { cursor: pointer; font-weight: 600; }
+.settings-header { display: flex; align-items: center; gap: 8px; }
+.settings-toggle { flex: 1; text-align: left; border: 0; padding: 0; background: none; color: var(--text); font-weight: 600; cursor: pointer; }
+.settings-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.settings-content:not([hidden]) { margin-top: 8px; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line); }
 th { color: var(--muted); font-weight: 500; }

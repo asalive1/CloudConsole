@@ -65,6 +65,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   );
   const [participant, setParticipant] = useState<Participant | null>(() => readStored<Participant>(sessionStorage, PARTICIPANT_KEY));
   const [micMuted, setMicMuted] = useState(false);
+  const [hostSettingsOpen, setHostSettingsOpen] = useState(false);
   const [monitor, setMonitor] = useState<MonitorSettings | null>(null);
   const [localChoice, setLocalChoice] = useState("program_mix");
   const [guestChoice, setGuestChoice] = useState("program_mix");
@@ -333,57 +334,6 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
         )}
       </section>
 
-      <section className="card" aria-label="Monitor">
-        <h2>Monitor</h2>
-        <div className="grid2">
-          <label>
-            <span className="label">My monitor</span>
-            <select
-              value={localChoice}
-              onChange={(event) => {
-                setLocalChoice(event.target.value);
-                void saveMonitor(monitorPatch("local", event.target.value));
-              }}
-            >
-              <SourceOptions sources={sources} />
-            </select>
-          </label>
-          <label>
-            <span className="label">Guest monitor</span>
-            <select
-              value={guestChoice}
-              onChange={(event) => {
-                setGuestChoice(event.target.value);
-                void saveMonitor(monitorPatch("guest", event.target.value));
-              }}
-            >
-              <SourceOptions sources={sources} />
-            </select>
-          </label>
-        </div>
-        <div className="row">
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.05"
-            aria-label="Monitor volume"
-            value={monitor?.local_volume ?? 0.8}
-            onChange={(event) => setMonitor((current) => current && { ...current, local_volume: Number(event.target.value) })}
-            onPointerUp={() => void saveMonitor({ local_volume: monitor?.local_volume ?? 0.8 })}
-            onKeyUp={() => void saveMonitor({ local_volume: monitor?.local_volume ?? 0.8 })}
-          />
-          <button
-            type="button"
-            className={`btn btn-small ${monitor?.local_muted ? "btn-on" : ""}`}
-            aria-pressed={monitor?.local_muted ?? false}
-            onClick={() => void saveMonitor({ local_muted: !(monitor?.local_muted ?? false) })}
-          >
-            {monitor?.local_muted ? "Muted" : "Mute"}
-          </button>
-        </div>
-      </section>
-
       <section className="card" aria-label="Local user">
         <div className="my-mic">
           <label className="switch" title="Activate your microphone on the console">
@@ -407,53 +357,117 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
         {live.error && <p className="error" role="alert">{live.error}</p>}
       </section>
 
-      <details className="card settings" aria-label="Settings">
-        <summary>Settings and guests</summary>
-        <div className="grid2">
-          <label>
-            <span className="label">Display name</span>
-            <input value={prefs.name} maxLength={100} onChange={(event) => setPrefs({ ...prefs, name: event.target.value })} />
-          </label>
-          <span />
-          <label>
-            <span className="label">Input device</span>
-            <select value={prefs.inputDeviceId} onChange={(event) => setPrefs({ ...prefs, inputDeviceId: event.target.value })}>
-              <option value="">System default</option>
-              {devices.inputs.map((device, index) => (
-                <option key={device.deviceId} value={device.deviceId}>{deviceLabel(device, index)}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span className="label">Output device</span>
-            <select
-              value={prefs.outputDeviceId}
-              disabled={!devices.canSelectOutput}
-              onChange={(event) => setPrefs({ ...prefs, outputDeviceId: event.target.value })}
-            >
-              <option value="">System default</option>
-              {devices.outputs.map((device, index) => (
-                <option key={device.deviceId} value={device.deviceId}>{deviceLabel(device, index)}</option>
-              ))}
-            </select>
-          </label>
-        </div>
-        {devices.needsPermission && (
-          <button type="button" className="btn btn-small" onClick={() => void devices.requestPermission()}>
-            Allow microphone access to list devices
+      <section className="card settings" aria-label="Host settings">
+        <div className="settings-header">
+          <button
+            type="button"
+            className="settings-toggle"
+            aria-expanded={hostSettingsOpen}
+            aria-controls="host-settings-content"
+            onClick={() => setHostSettingsOpen(!hostSettingsOpen)}
+          >
+            <span aria-hidden="true">{hostSettingsOpen ? "▾" : "▸"}</span> Host Settings
           </button>
-        )}
-        {devices.error && <p className="error">{devices.error}</p>}
-
-        <h3>Guest links</h3>
-        <button type="button" className="btn btn-small" onClick={() => void createLink()}>New guest link (8 h)</button>
-        {newLink && <input readOnly className="mono" value={newLink} onFocus={(event) => event.currentTarget.select()} />}
-        {activeLinks.map((link) => (
-          <div key={link.id} className="row">
-            <span className="small">{link.name ?? "Guest link"} · expires {new Date(link.expires_at).toLocaleString()}</span>
-            <button type="button" className="btn btn-small" onClick={() => void invalidate(link.id)}>Invalidate</button>
+          <button
+            type="button"
+            className={`btn btn-small ${monitor?.local_muted ? "btn-on" : ""}`}
+            aria-label="Mute host monitor"
+            aria-pressed={monitor?.local_muted ?? false}
+            onClick={() => void saveMonitor({ local_muted: !(monitor?.local_muted ?? false) })}
+          >
+            {monitor?.local_muted ? "Muted" : "Mute"}
+          </button>
+        </div>
+        <div id="host-settings-content" className="settings-content" hidden={!hostSettingsOpen}>
+          <div className="grid2">
+            <label>
+              <span className="label">Display name</span>
+              <input value={prefs.name} maxLength={100} onChange={(event) => setPrefs({ ...prefs, name: event.target.value })} />
+            </label>
+            <span />
+            <label>
+              <span className="label">Input device</span>
+              <select value={prefs.inputDeviceId} onChange={(event) => setPrefs({ ...prefs, inputDeviceId: event.target.value })}>
+                <option value="">System default</option>
+                {devices.inputs.map((device, index) => (
+                  <option key={device.deviceId} value={device.deviceId}>{deviceLabel(device, index)}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span className="label">Output device</span>
+              <select
+                value={prefs.outputDeviceId}
+                disabled={!devices.canSelectOutput}
+                onChange={(event) => setPrefs({ ...prefs, outputDeviceId: event.target.value })}
+              >
+                <option value="">System default</option>
+                {devices.outputs.map((device, index) => (
+                  <option key={device.deviceId} value={device.deviceId}>{deviceLabel(device, index)}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span className="label">My monitor</span>
+              <select
+                value={localChoice}
+                onChange={(event) => {
+                  setLocalChoice(event.target.value);
+                  void saveMonitor(monitorPatch("local", event.target.value));
+                }}
+              >
+                <SourceOptions sources={sources} />
+              </select>
+            </label>
+            <label>
+              <span className="label">Monitor volume</span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                aria-label="Monitor volume"
+                value={monitor?.local_volume ?? 0.8}
+                onChange={(event) => setMonitor((current) => current && { ...current, local_volume: Number(event.target.value) })}
+                onPointerUp={() => void saveMonitor({ local_volume: monitor?.local_volume ?? 0.8 })}
+                onKeyUp={() => void saveMonitor({ local_volume: monitor?.local_volume ?? 0.8 })}
+              />
+            </label>
           </div>
-        ))}
+          {devices.needsPermission && (
+            <button type="button" className="btn btn-small" onClick={() => void devices.requestPermission()}>
+              Allow microphone access to list devices
+            </button>
+          )}
+          {devices.error && <p className="error">{devices.error}</p>}
+        </div>
+      </section>
+
+      <details className="card settings" aria-label="Guest settings">
+        <summary>Guest Settings</summary>
+        <div className="settings-content">
+          <label>
+            <span className="label">Guest monitor</span>
+            <select
+              value={guestChoice}
+              onChange={(event) => {
+                setGuestChoice(event.target.value);
+                void saveMonitor(monitorPatch("guest", event.target.value));
+              }}
+            >
+              <SourceOptions sources={sources} />
+            </select>
+          </label>
+          <h3>Guest links</h3>
+          <button type="button" className="btn btn-small" onClick={() => void createLink()}>New guest link (8 h)</button>
+          {newLink && <input readOnly className="mono" value={newLink} onFocus={(event) => event.currentTarget.select()} />}
+          {activeLinks.map((link) => (
+            <div key={link.id} className="row">
+              <span className="small">{link.name ?? "Guest link"} · expires {new Date(link.expires_at).toLocaleString()}</span>
+              <button type="button" className="btn btn-small" onClick={() => void invalidate(link.id)}>Invalidate</button>
+            </div>
+          ))}
+        </div>
       </details>
 
       <details className="card stats" aria-label="Audio stream statistics">

@@ -304,12 +304,16 @@ forward for remote users).
 | Station admin | `https://wxyz.example.com/admin` |
 | API docs | `https://wxyz.example.com/api/docs` |
 | Health check | `https://wxyz.example.com/api/health` |
-| Guest link | `https://wxyz.example.com/?invite=<token>` (created in the console, "Settings and guests") |
+| Guest link | `https://wxyz.example.com/?invite=<token>` (created in the console, "Guest Settings") |
 | Embedding in another web UI | `<iframe src="https://wxyz.example.com/" allow="microphone; autoplay">` |
 | Direct (bypassing NPM, for testing) | `http://192.168.50.207:7002/` (microphone will not work over plain http) |
 
 Use the arrows on input strips to reorder them for the current browser. This
 order is stored in browser local storage and is not shared with other browsers.
+Below the microphone controls, Host Settings contains the host's name, devices,
+monitor selection and volume. Its monitor mute stays available when collapsed
+and is separate from the microphone mute. Guest Settings contains the guest
+monitor selection and guest links.
 The console's Refresh button reloads only the console frame, not its parent
 page. It asks for confirmation when audio is active because reloading
 temporarily disconnects the microphone and monitor audio. Audio stream
