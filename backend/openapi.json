@@ -56,7 +56,7 @@
           "name": { "type": ["string", "null"] },
           "expires_at": { "type": "string", "format": "date-time" },
           "invalidated_at": { "type": ["string", "null"], "format": "date-time" },
-          "invitation_token": { "type": ["string", "null"], "description": "Returned only when the link is created." }
+          "invitation_token": { "type": ["string", "null"], "description": "Returned to authorized operators for active recoverable links; older links cannot be recovered." }
         }
       },
       "GuestSessionCreate": {
@@ -756,6 +756,16 @@
           "401": { "description": "Credential is invalid or does not have delay-control permission", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
           "409": { "description": "Delay is already built", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
           "502": { "description": "Audio engine is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/guest-monitor": {
+      "get": {
+        "summary": "Get the monitor source for an approved guest",
+        "security": [{ "GuestBearer": [] }],
+        "responses": {
+          "200": { "description": "Guest monitor source", "content": { "application/json": { "schema": { "type": "object", "required": ["guest_source"], "properties": { "guest_source": { "type": "string" } } } } } },
+          "401": { "description": "Guest session is not authorized" }
         }
       }
     },

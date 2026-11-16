@@ -203,6 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/delay/end", axum::routing::post(routes::end_delay))
         .route("/api/delay/build", axum::routing::post(routes::build_delay))
         .route("/api/monitor", get(routes::get_monitor_settings).put(routes::update_monitor_settings))
+        .route("/api/guest-monitor", get(routes::get_guest_monitor))
         .route(
             "/api/mixer/channels",
             get(routes::list_mixer_channels),

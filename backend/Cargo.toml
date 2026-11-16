@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
+hmac = "0.12"
 jsonwebtoken = "9"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

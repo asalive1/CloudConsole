@@ -9,8 +9,8 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -966,20 +966,29 @@ pub async fn list_guest_links(
 ) -> Result<Json<Vec<GuestLinkResponse>>, ApiError> {
     authorize_station(&headers, &state)?;
     let rows = sqlx::query(
-        "SELECT id, name, expires_at, invalidated_at, CASE WHEN invalidated_at IS NOT NULL THEN 'invalidated' WHEN expires_at <= NOW() THEN 'expired' ELSE 'active' END AS status FROM guest_links WHERE station_id = $1 ORDER BY created_at DESC",
+        "SELECT id, name, expires_at, invalidated_at, recoverable, token_hash, CASE WHEN invalidated_at IS NOT NULL THEN 'invalidated' WHEN expires_at <= NOW() THEN 'expired' ELSE 'active' END AS status FROM guest_links WHERE station_id = $1 ORDER BY created_at DESC",
     )
     .bind(state.station_id)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(
         rows.into_iter()
-            .map(|row| GuestLinkResponse {
-                id: row.get("id"),
-                name: row.get("name"),
-                expires_at: row.get("expires_at"),
-                invalidated_at: row.get("invalidated_at"),
-                invitation_token: None,
-                status: row.get("status"),
+            .map(|row| {
+                let id = row.get("id");
+                let status: String = row.get("status");
+                let token = recoverable_token(&state.guest_jwt_secret, state.station_id, id);
+                let hash: Vec<u8> = row.get("token_hash");
+                let available = row.get::<bool, _>("recoverable")
+                    && status == "active"
+                    && bool::from(hash_token(&token).ct_eq(&hash));
+                GuestLinkResponse {
+                    id,
+                    name: row.get("name"),
+                    expires_at: row.get("expires_at"),
+                    invalidated_at: row.get("invalidated_at"),
+                    invitation_token: available.then_some(token),
+                    status,
+                }
             })
             .collect(),
     ))
@@ -996,10 +1005,10 @@ pub async fn create_guest_link(
             "expires_at must be in the future".to_owned(),
         ));
     }
-    let token = random_token();
     let id = Uuid::new_v4();
+    let token = recoverable_token(&state.guest_jwt_secret, state.station_id, id);
     sqlx::query(
-        "INSERT INTO guest_links (id, station_id, name, token_hash, expires_at) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO guest_links (id, station_id, name, token_hash, expires_at, recoverable) VALUES ($1, $2, $3, $4, $5, TRUE)",
     )
     .bind(id)
     .bind(state.station_id)
@@ -1965,10 +1974,17 @@ fn decode_participant_token(token: &str, state: &AppState) -> Result<Participant
     Ok(claims)
 }
 
-fn random_token() -> String {
-    let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+fn recoverable_token(secret: &str, station_id: Uuid, id: Uuid) -> String {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts keys of any length");
+    mac.update(b"cloud-console-guest-invitation-v1");
+    mac.update(station_id.as_bytes());
+    mac.update(id.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn hash_token(token: &str) -> Vec<u8> {
@@ -1988,16 +2004,20 @@ mod tests {
 
     #[test]
     fn guest_invitation_tokens_are_random_hex_values() {
-        let first = random_token();
-        let second = random_token();
+        let station = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let first = recoverable_token("secret", station, id);
+        let second = recoverable_token("secret", station, Uuid::new_v4());
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(first, second);
+        assert_eq!(first, recoverable_token("secret", station, id));
+        assert_ne!(first, recoverable_token("different", station, id));
     }
 
     #[test]
     fn invitation_tokens_are_stored_as_fixed_length_hashes() {
-        let token = random_token();
+        let token = recoverable_token("secret", Uuid::new_v4(), Uuid::new_v4());
         let hash = hash_token(&token);
         assert_eq!(hash.len(), 32);
         assert_ne!(hash, token.as_bytes());
@@ -2050,6 +2070,29 @@ pub async fn get_monitor_settings(
     Ok(Json(load_monitor_settings(&state).await?))
 }
 
+pub async fn get_guest_monitor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_participant(&headers, &state)?;
+    let id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::Unauthorized)?;
+    if claims.role != "guest" {
+        return Err(ApiError::Unauthorized);
+    }
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sessions s JOIN guest_links gl ON gl.id = s.guest_link_id AND gl.station_id = s.station_id WHERE s.id = $1 AND s.station_id = $2 AND s.role = 'guest' AND s.status IN ('approved', 'connected', 'disconnected') AND s.expires_at > NOW() AND gl.invalidated_at IS NULL AND gl.expires_at > NOW())",
+    )
+    .bind(id)
+    .bind(state.station_id)
+    .fetch_one(&state.pool)
+    .await?;
+    if !active {
+        return Err(ApiError::Unauthorized);
+    }
+    let settings = load_monitor_settings(&state).await?;
+    Ok(Json(json!({ "guest_source": settings["guest_source"] })))
+}
+
 pub async fn update_monitor_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2066,6 +2109,11 @@ pub async fn update_monitor_settings(
         if !valid_monitor_source(source) {
             return Err(ApiError::InvalidRequest(
                 "monitor source must be cue, program_mix, mix_minus, or input".to_owned(),
+            ));
+        }
+        if request.guest_source.as_deref() == Some("input") {
+            return Err(ApiError::InvalidRequest(
+                "individual input monitoring is not available for guests".to_owned(),
             ));
         }
     }

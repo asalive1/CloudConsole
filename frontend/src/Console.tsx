@@ -71,6 +71,9 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   const [guestChoice, setGuestChoice] = useState("program_mix");
   const [error, setError] = useState("");
   const [newLink, setNewLink] = useState("");
+  const [copyStatus, setCopyStatus] = useState("");
+  const guestSavePending = useRef(false);
+  const [guestSaving, setGuestSaving] = useState(false);
   const [inputOrder, setInputOrder] = useState<string[]>(() => {
     const saved = readStored<unknown>(localStorage, INPUT_ORDER_KEY);
     return Array.isArray(saved) ? saved.filter((id): id is string => typeof id === "string") : [];
@@ -87,9 +90,18 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
     if (data && !monitor) {
       setMonitor(data);
       setLocalChoice(data.local_source === "input" && data.local_input_id ? `input:${data.local_input_id}` : data.local_source);
-      setGuestChoice(data.guest_source === "input" && data.guest_input_id ? `input:${data.guest_input_id}` : data.guest_source);
+      if (!guestSavePending.current) {
+        setGuestChoice(data.guest_source === "input" && data.guest_input_id ? `input:${data.guest_input_id}` : data.guest_source);
+      }
     }
   }, [monitorPoll.data, monitor]);
+
+  useEffect(() => {
+    const data = monitorPoll.data;
+    if (data && !guestSavePending.current) {
+      setGuestChoice(data.guest_source === "input" && data.guest_input_id ? `input:${data.guest_input_id}` : data.guest_source);
+    }
+  }, [monitorPoll.data]);
 
   // Make sure the local user has a host session so the monitor feed can be heard.
   useEffect(() => {
@@ -204,10 +216,36 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   }
 
   async function saveMonitor(patch: Record<string, unknown>) {
+    const guestUpdate = "guest_source" in patch;
+    if (guestUpdate) {
+      if (guestSavePending.current) return;
+      guestSavePending.current = true;
+      setGuestSaving(true);
+    }
     try {
-      setMonitor(await apiRequest<MonitorSettings>("/monitor", { method: "PUT", headers: json, body: JSON.stringify(patch) }));
+      const saved = await apiRequest<MonitorSettings>("/monitor", { method: "PUT", headers: json, body: JSON.stringify(patch) });
+      setMonitor(saved);
+      if (guestUpdate) setGuestChoice(saved.guest_source === "input" && saved.guest_input_id ? `input:${saved.guest_input_id}` : saved.guest_source);
     } catch (cause) {
       setError(errorMessage(cause));
+      if (guestUpdate && monitorPoll.data) setGuestChoice(monitorPoll.data.guest_source === "input" && monitorPoll.data.guest_input_id ? `input:${monitorPoll.data.guest_input_id}` : monitorPoll.data.guest_source);
+    } finally {
+      if (guestUpdate) {
+        monitorPoll.refresh();
+        guestSavePending.current = false;
+        setGuestSaving(false);
+      }
+    }
+  }
+
+  async function copyGuestLink(token: string) {
+    const url = `${window.location.origin}/?invite=${encodeURIComponent(token)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyStatus("Guest link copied.");
+    } catch (cause) {
+      setError(`Could not copy guest link: ${errorMessage(cause)}`);
+      setNewLink(url);
     }
   }
 
@@ -236,7 +274,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
       if (link.invitation_token) {
         const url = `${window.location.origin}/?invite=${encodeURIComponent(link.invitation_token)}`;
         setNewLink(url);
-        await navigator.clipboard.writeText(url).catch(() => undefined);
+        await copyGuestLink(link.invitation_token);
       }
       links.refresh();
     } catch (cause) {
@@ -450,23 +488,32 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
             <span className="label">Guest monitor</span>
             <select
               value={guestChoice}
+              disabled={guestSaving}
               onChange={(event) => {
+                if (guestSavePending.current) return;
                 setGuestChoice(event.target.value);
                 void saveMonitor(monitorPatch("guest", event.target.value));
               }}
             >
-              <SourceOptions sources={sources} />
+              <SourceOptions sources={sources} disableInputs />
             </select>
           </label>
           <h3>Guest links</h3>
+          <p className="muted small">Individual input monitoring is not available for guests.</p>
           <button type="button" className="btn btn-small" onClick={() => void createLink()}>New guest link (8 h)</button>
           {newLink && <input readOnly className="mono" value={newLink} onFocus={(event) => event.currentTarget.select()} />}
           {activeLinks.map((link) => (
             <div key={link.id} className="row">
               <span className="small">{link.name ?? "Guest link"} · expires {new Date(link.expires_at).toLocaleString()}</span>
-              <button type="button" className="btn btn-small" onClick={() => void invalidate(link.id)}>Invalidate</button>
+              <span className="row-actions">
+                {link.invitation_token ? (
+                  <button type="button" className="btn btn-small" onClick={() => { if (link.invitation_token) void copyGuestLink(link.invitation_token); }}>Copy link</button>
+                ) : <span className="small muted">Original link unavailable; create a new link to resend.</span>}
+                <button type="button" className="btn btn-small" onClick={() => void invalidate(link.id)}>Invalidate</button>
+              </span>
             </div>
           ))}
+          {copyStatus && <p className="small" role="status">{copyStatus}</p>}
         </div>
       </details>
 
@@ -524,14 +571,14 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   );
 }
 
-function SourceOptions({ sources }: { sources: MixerChannel[] }) {
+function SourceOptions({ sources, disableInputs = false }: { sources: MixerChannel[]; disableInputs?: boolean }) {
   return (
     <>
       <option value="program_mix">Program mix</option>
       <option value="mix_minus">Mix-minus (Program − my mic)</option>
       <option value="cue">Cue</option>
       {sources.map((source) => (
-        <option key={source.channel_id} value={`input:${source.channel_id}`}>{source.display_name}</option>
+        <option key={source.channel_id} value={`input:${source.channel_id}`} disabled={disableInputs}>{source.display_name}{disableInputs ? " (unavailable)" : ""}</option>
       ))}
     </>
   );

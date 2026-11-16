@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { apiRequest, errorMessage, readStored, type Participant } from "./api";
 import { deviceLabel, useAudioDevices } from "./useAudioDevices";
 import { useLiveAudio } from "./useLiveAudio";
+import { guestMonitor } from "./guestMonitor";
 
 const ENDED = ["rejected", "expired", "timed_out"];
 
@@ -139,16 +140,48 @@ function GuestStudio({ participant, onLeave }: { participant: Participant; onLea
   const [micMuted, setMicMuted] = useState(false);
   const [monitorMuted, setMonitorMuted] = useState(false);
   const [volume, setVolume] = useState(0.8);
+  const [guestSource, setGuestSource] = useState<string | null>(null);
+  const [monitorError, setMonitorError] = useState("");
+  useEffect(() => {
+    let active = true;
+    let sequence = 0;
+    let applied = 0;
+    const load = () => {
+      const request = ++sequence;
+      void apiRequest<{ guest_source: string }>("/guest-monitor", {
+        headers: { Authorization: `Bearer ${participant.access_token}` },
+      }).then(({ guest_source }) => {
+        if (!active || request <= applied) return;
+        applied = request;
+        if (!guestMonitor(guest_source).available) {
+          setGuestSource(null);
+          setMonitorError("The selected guest monitor source is unavailable. Ask the host to select Program, Mix-minus, or Cue.");
+          return;
+        }
+        setGuestSource(guest_source);
+        setMonitorError("");
+      }).catch((cause: unknown) => {
+        if (active && request > applied) {
+          applied = request;
+          setMonitorError(`Could not refresh guest monitor: ${errorMessage(cause)}`);
+        }
+      });
+    };
+    load();
+    const timer = window.setInterval(load, 2000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [participant.access_token]);
+  const selectedMonitor = guestMonitor(guestSource);
   const live = useLiveAudio({
     participant,
     mode: "live",
     inputDeviceId: inputId,
     outputDeviceId: outputId,
-    monitorBus: "program",
+    monitorBus: selectedMonitor.bus,
     monitorVolume: volume,
-    monitorMuted,
+    monitorMuted: monitorMuted || !selectedMonitor.available,
     micMuted,
-    sidetone: false,
+    sidetone: selectedMonitor.sidetone,
   });
 
   return (
@@ -195,6 +228,7 @@ function GuestStudio({ participant, onLeave }: { participant: Participant; onLea
         </button>
       )}
       {live.error && <p className="error" role="alert">{live.error}</p>}
+      {monitorError && <p className="error" role="alert">{monitorError}</p>}
       <button type="button" className="btn" onClick={onLeave}>Leave</button>
     </section>
   );

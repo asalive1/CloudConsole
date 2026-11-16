@@ -75,6 +75,37 @@ assert.equal(sessions.length, 101);
 assert.ok(sessions.some((session) => session.id === "00000000-0000-0000-0000-000000000004" && session.status === "connected"),
   "older connected hosts must be included beyond the recent-session limit");
 
+const operatorHeaders = { "X-API-Key": key, "Content-Type": "application/json" };
+const createdLink = await fetch(`${base}/api/guest-links`, {
+  method: "POST", headers: operatorHeaders,
+  body: JSON.stringify({ expires_at: new Date(Date.now() + 3600000).toISOString() }),
+});
+assert.equal(createdLink.status, 201);
+const invitation = await createdLink.json();
+const listedLinks = await (await fetch(`${base}/api/guest-links`, { headers: operatorHeaders })).json();
+assert.equal(listedLinks.find((link) => link.id === invitation.id).invitation_token, invitation.invitation_token);
+assert.equal((await fetch(`${base}/api/guest-links`)).status, 401);
+const joined = await fetch(`${base}/api/guest-links/${invitation.invitation_token}/sessions`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Guest" }),
+});
+assert.equal(joined.status, 201);
+const guest = await joined.json();
+const guestHeaders = { Authorization: `Bearer ${guest.access_token}` };
+assert.equal((await fetch(`${base}/api/guest-monitor`, { headers: guestHeaders })).status, 401);
+assert.equal((await fetch(`${base}/api/live-sessions/${guest.session_id}/approve`, { method: "POST", headers: operatorHeaders })).status, 200);
+for (const source of ["cue", "mix_minus", "program_mix"]) {
+  const changed = await fetch(`${base}/api/monitor`, { method: "PUT", headers: operatorHeaders, body: JSON.stringify({ guest_source: source }) });
+  assert.equal(changed.status, 200);
+  const received = await fetch(`${base}/api/guest-monitor`, { headers: guestHeaders });
+  assert.equal(received.status, 200);
+  assert.deepEqual(await received.json(), { guest_source: source });
+}
+assert.equal((await fetch(`${base}/api/monitor`, { method: "PUT", headers: operatorHeaders, body: JSON.stringify({ guest_source: "input", guest_input_id: id }) })).status, 400);
+assert.equal((await fetch(`${base}/api/guest-links/${invitation.id}`, { method: "DELETE", headers: operatorHeaders })).status, 204);
+assert.equal((await fetch(`${base}/api/guest-monitor`, { headers: guestHeaders })).status, 401);
+const revokedLinks = await (await fetch(`${base}/api/guest-links`, { headers: operatorHeaders })).json();
+assert.equal(revokedLinks.find((link) => link.id === invitation.id).invitation_token, null);
+
 const hostResponse = await fetch(`${base}/api/live-sessions`, {
   method: "POST",
   headers: { "X-API-Key": key, "Content-Type": "application/json" },

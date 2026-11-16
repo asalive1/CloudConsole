@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { mergeMixerUpdate, type MixerChannelUpdate } from "./mixerUpdates";
 
 export const API_BASE = "/api";
@@ -119,23 +119,25 @@ export function usePolling<T>(
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
   const [version, setVersion] = useState(0);
+  const generation = useRef(0);
 
   useEffect(() => {
     let active = true;
+    const currentGeneration = generation.current;
     let requestNumber = 0;
     let appliedNumber = 0;
     const load = () => {
       const current = ++requestNumber;
       void apiRequest<T>(path, { headers: { "X-API-Key": apiKey } })
         .then((next) => {
-          if (active && current > appliedNumber) {
+          if (active && currentGeneration === generation.current && current > appliedNumber) {
             appliedNumber = current;
             setData(next);
             setError("");
           }
         })
         .catch((cause: unknown) => {
-          if (active && current > appliedNumber) {
+          if (active && currentGeneration === generation.current && current > appliedNumber) {
             appliedNumber = current;
             setError(errorMessage(cause));
           }
@@ -149,7 +151,14 @@ export function usePolling<T>(
     };
   }, [path, apiKey, intervalMs, version]);
 
-  return { data, error, refresh: () => setVersion((value) => value + 1) };
+  return {
+    data,
+    error,
+    refresh: () => {
+      generation.current += 1;
+      setVersion((value) => value + 1);
+    },
+  };
 }
 
 // Keeps the operator's mixer channel list in sync over the mixer websocket.

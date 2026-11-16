@@ -314,6 +314,14 @@ Below the microphone controls, Host Settings contains the host's name, devices,
 monitor selection and volume. Its monitor mute stays available when collapsed
 and is separate from the microphone mute. Guest Settings contains the guest
 monitor selection and guest links.
+New guest links can be copied again from Guest Settings by any authorized
+operator. Older links whose original URL was lost cannot be recovered; create a
+new link instead. Link recovery depends on the station's `GUEST_JWT_SECRET`:
+keep it stable and backed up securely. Changing it invalidates participant
+tokens and makes previously recoverable invitation URLs unavailable for copying.
+Guest monitoring supports Program (including local microphone sidetone),
+mix-minus, and Cue. Individual input monitoring is unavailable for guests.
+Changes reach connected guests within a few seconds.
 The console's Refresh button reloads only the console frame, not its parent
 page. It asks for confirmation when audio is active because reloading
 temporarily disconnects the microphone and monitor audio. Audio stream
