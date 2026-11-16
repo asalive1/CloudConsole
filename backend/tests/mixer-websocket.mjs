@@ -68,6 +68,13 @@ for (let i = 0; i < 30; i++) {
 }
 assert.ok(ready, "test backend did not become ready");
 
+const sessionResponse = await fetch(`${base}/api/live-sessions`, { headers: { "X-API-Key": key } });
+assert.equal(sessionResponse.status, 200);
+const sessions = await sessionResponse.json();
+assert.equal(sessions.length, 101);
+assert.ok(sessions.some((session) => session.id === "00000000-0000-0000-0000-000000000004" && session.status === "connected"),
+  "older connected hosts must be included beyond the recent-session limit");
+
 const ws = await connect();
 const update = new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error("Mixer update timed out")), 5000);

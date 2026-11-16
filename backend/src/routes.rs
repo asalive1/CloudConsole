@@ -1296,7 +1296,7 @@ pub async fn list_live_sessions(
     authorize_station(&headers, &state)?;
     expire_stale_sessions(&state).await?;
     let rows = sqlx::query(
-        "SELECT id, display_name, role, status, expires_at FROM sessions WHERE station_id = $1 AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 100",
+        "SELECT id, display_name, role, status, expires_at FROM sessions WHERE station_id = $1 AND (status = 'connected' OR id IN (SELECT id FROM sessions WHERE station_id = $1 AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 100)) ORDER BY created_at DESC",
     )
     .bind(state.station_id)
     .fetch_all(&state.pool)

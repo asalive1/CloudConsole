@@ -5,6 +5,7 @@ declare const __APP_VERSION__: string;
 const APP_VERSION = __APP_VERSION__;
 import { deviceLabel, useAudioDevices } from "./useAudioDevices";
 import { useLiveAudio } from "./useLiveAudio";
+import { moveInput, orderInputs } from "./inputOrder";
 import {
   apiRequest,
   errorMessage,
@@ -22,6 +23,7 @@ import {
 
 const PARTICIPANT_KEY = "cloud-console-live-session";
 const PREFS_KEY = "cloud-console-local-prefs";
+const INPUT_ORDER_KEY = "cloud-console-input-order";
 
 let creating: Promise<Participant> | null = null;
 
@@ -50,7 +52,7 @@ function Meter({ values, label }: { values: number[] | null | undefined; label?:
 export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignOut: () => void }) {
   const operator = useMemo<HeadersInit>(() => ({ "X-API-Key": apiKey }), [apiKey]);
   const json = useMemo<HeadersInit>(() => ({ ...operator, "Content-Type": "application/json" }), [operator]);
-  const { channels } = useMixerChannels(apiKey);
+  const { channels, error: mixerError } = useMixerChannels(apiKey);
   const metrics = usePolling<AudioMetrics>("/audio/metrics", apiKey, 400);
   const monitorPoll = usePolling<MonitorSettings>("/monitor", apiKey, 5000);
   const sessions = usePolling<LiveSession[]>("/live-sessions", apiKey, 3000);
@@ -68,6 +70,10 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   const [guestChoice, setGuestChoice] = useState("program_mix");
   const [error, setError] = useState("");
   const [newLink, setNewLink] = useState("");
+  const [inputOrder, setInputOrder] = useState<string[]>(() => {
+    const saved = readStored<unknown>(localStorage, INPUT_ORDER_KEY);
+    return Array.isArray(saved) ? saved.filter((id): id is string => typeof id === "string") : [];
+  });
   const pendingMix = useRef(new Map<string, Partial<Pick<MixerChannel, "fader" | "is_on" | "cue_enabled" | "muted">>>());
   const sendingMix = useRef(new Set<string>());
 
@@ -155,7 +161,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
   });
 
   const ownId = participant?.session_id;
-  const sources = channels.filter((channel) => channel.role === "automation" || channel.role === "aux");
+  const sources = orderInputs(channels.filter((channel) => channel.role === "automation" || channel.role === "aux"), inputOrder);
   const connectedIds = new Set((sessions.data ?? []).filter((item) => item.status === "connected").map((item) => item.id));
   const sessionNames = new Map((sessions.data ?? []).map((item) => [item.id, item.display_name]));
   const mics = channels
@@ -163,6 +169,19 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
     .map((channel) => ({ ...channel, display_name: sessionNames.get(channel.channel_id) ?? channel.display_name }));
   const ownChannel = channels.find((channel) => channel.channel_id === ownId);
   const metricFor = (id: string) => metrics.data?.sources.find((source) => source.id === id);
+
+  function reorderInput(id: string, direction: -1 | 1) {
+    const orderedIds = sources.map((source) => source.channel_id);
+    const next = moveInput(orderedIds, id, direction);
+    setInputOrder(next);
+    localStorage.setItem(INPUT_ORDER_KEY, JSON.stringify(next));
+  }
+
+  function refreshConsole() {
+    if ((live.connected || prefs.active) &&
+      !window.confirm("Refreshing will disconnect live audio temporarily. Refresh this console?")) return;
+    window.location.reload();
+  }
 
   async function patchChannel(id: string, body: Partial<Pick<MixerChannel, "fader" | "is_on" | "cue_enabled" | "muted">>) {
     pendingMix.current.set(id, { ...pendingMix.current.get(id), ...body });
@@ -244,12 +263,14 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
         <span className={`chip ${metrics.data?.pipeline_state === "playing" ? "chip-live" : ""}`}>
           {metrics.data ? (metrics.data.pipeline_state === "playing" ? "On-Air" : metrics.data.pipeline_state) : metrics.error ? "engine offline" : "…"}
         </span>
+        <button type="button" className="btn btn-small" onClick={refreshConsole} title="Refresh this console only">Refresh</button>
         <button type="button" className="btn btn-small" onClick={onSignOut}>Sign out</button>
       </header>
 
       {error && (
         <p className="error" role="alert" onClick={() => setError("")}>{error}</p>
       )}
+      {(mixerError || sessions.error) && <p className="error" role="alert">{mixerError || `Session refresh failed: ${sessions.error}`}</p>}
 
       <section className="card program-card" aria-label="Program level">
         <span className="label">Program</span>
@@ -261,13 +282,19 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
         <DelayControls apiKey={apiKey} />
         <section className="strips" aria-label="Input faders">
           {sources.length === 0 && <p className="muted pad">No audio inputs configured. Add one in Station admin.</p>}
-          {sources.map((channel) => (
+          {sources.map((channel, index) => (
             <Strip
               key={channel.channel_id}
               channel={channel}
               peak={metricFor(channel.channel_id)?.peak_dbfs}
               state={metricFor(channel.channel_id)?.state}
               onChange={(body) => void patchChannel(channel.channel_id, body)}
+              reorder={{
+                left: () => reorderInput(channel.channel_id, -1),
+                right: () => reorderInput(channel.channel_id, 1),
+                canLeft: index > 0,
+                canRight: index < sources.length - 1,
+              }}
             />
           ))}
         </section>
@@ -446,6 +473,22 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
                 <td>{source.packets_lost ?? "—"}</td>
               </tr>
             ))}
+            {prefs.active && (
+              <tr>
+                <td>{prefs.name || "Me"} (local mic)</td>
+                <td>{live.status}</td>
+                <td>{dbText(ownId && ownId in live.levels ? [live.levels[ownId]] : null)}</td>
+                <td>—</td><td>—</td>
+              </tr>
+            )}
+            {mics.map((mic) => (
+              <tr key={mic.channel_id}>
+                <td>{mic.display_name} (mic)</td>
+                <td>Connected</td>
+                <td>{dbText(mic.channel_id in live.levels ? [live.levels[mic.channel_id]] : null)}</td>
+                <td>—</td><td>—</td>
+              </tr>
+            ))}
             <tr>
               <td>Program out</td>
               <td>{metrics.data?.output_count ?? 0} output(s)</td>
@@ -454,6 +497,7 @@ export default function Console({ apiKey, onSignOut }: { apiKey: string; onSignO
             </tr>
           </tbody>
         </table>
+        <p className="muted small">Mic levels are approximate; per-mic jitter and packet loss are not available.</p>
         {metrics.data?.last_pipeline_error && <p className="error">{metrics.data.last_pipeline_error}</p>}
       </details>
 
@@ -485,12 +529,14 @@ function Strip({
   state,
   onChange,
   onDisconnect,
+  reorder,
 }: {
   channel: MixerChannel;
   peak?: number[] | null;
   state?: string;
   onChange: (body: Partial<Pick<MixerChannel, "fader" | "is_on" | "cue_enabled" | "muted">>) => void;
   onDisconnect?: () => void;
+  reorder?: { left: () => void; right: () => void; canLeft: boolean; canRight: boolean };
 }) {
   const [fader, setFader] = useState(channel.fader);
   const [dragging, setDragging] = useState(false);
@@ -504,6 +550,12 @@ function Strip({
   return (
     <div className={`strip ${channel.is_on && !channel.muted ? "strip-on" : ""}`}>
       <span className="strip-name" title={channel.display_name}>{channel.display_name}</span>
+      {reorder && (
+        <div className="strip-reorder">
+          <button type="button" className="btn btn-small" aria-label={`Move ${channel.display_name} left`} disabled={!reorder.canLeft} onClick={reorder.left}>‹</button>
+          <button type="button" className="btn btn-small" aria-label={`Move ${channel.display_name} right`} disabled={!reorder.canRight} onClick={reorder.right}>›</button>
+        </div>
+      )}
       <span className="small muted">{isMic ? roleLabel(channel.role) : state ?? "—"}</span>
       <div className="strip-body">
         <Meter values={peak} label={channel.display_name} />

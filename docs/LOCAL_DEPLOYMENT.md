@@ -308,6 +308,14 @@ forward for remote users).
 | Embedding in another web UI | `<iframe src="https://wxyz.example.com/" allow="microphone; autoplay">` |
 | Direct (bypassing NPM, for testing) | `http://192.168.50.207:7002/` (microphone will not work over plain http) |
 
+Use the arrows on input strips to reorder them for the current browser. This
+order is stored in browser local storage and is not shared with other browsers.
+The console's Refresh button reloads only the console frame, not its parent
+page. It asks for confirmation when audio is active because reloading
+temporarily disconnects the microphone and monitor audio. Audio stream
+statistics include approximate microphone levels; individual microphone
+jitter and packet loss are not currently available.
+
 A second station is simply `https://kabc.example.com/` forwarded to port 7003.
 
 ## 6. Audio and metadata on the two NICs

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import Janus, { type JanusJS } from "janus-gateway";
 import adapter from "webrtc-adapter";
 import { API_BASE, type MixerChannel, type Participant } from "./api";
+import { queueConnectionReport } from "./connectionReport";
 import { roomMix } from "./liveMix";
 
 type Bus = "program" | "cue";
@@ -48,6 +49,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
   const { participant, mode, inputDeviceId } = options;
   const [status, setStatus] = useState("Not connected");
   const [error, setError] = useState("");
+  const [presenceError, setPresenceError] = useState("");
   const [connected, setConnected] = useState(false);
   const [channel, setChannel] = useState<MixerChannel | null>(null);
   const [levels, setLevels] = useState<Record<string, number>>({});
@@ -134,22 +136,36 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
     let reconnectTimer: number | null = null;
     let attempts = 0;
     let wasConnected = false;
+    let reportedState: "connected" | "disconnected" | null = null;
     const published = new Set<Bus>();
     const authorization = { Authorization: `Bearer ${session.access_token}` };
 
-    const report = async (state: "connected" | "disconnected") => {
-      try {
-        await fetch(`${API_BASE}/live-sessions/${session.session_id}/connection`, {
+    const report = (state: "connected" | "disconnected") => {
+      reportedState = state;
+      void queueConnectionReport(session.session_id, async () => {
+        const response = await fetch(`${API_BASE}/live-sessions/${session.session_id}/connection`, {
           method: "PATCH",
           headers: { ...authorization, "Content-Type": "application/json" },
           body: JSON.stringify({ state }),
+          signal: AbortSignal.timeout(5000),
+          keepalive: true,
         });
-      } catch {
-        /* the next status update retries */
-      }
+        if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      }).then(() => {
+        if (!stopped) setPresenceError("");
+      }).catch((cause: unknown) => {
+        console.error("Could not report audio connection state", cause);
+        if (!stopped) setPresenceError(`Could not update connection status: ${errorMessage(cause)}. Retrying.`);
+      });
     };
+    const heartbeat = window.setInterval(() => {
+      if ((reportedState === "connected" && wasConnected) || reportedState === "disconnected") report(reportedState);
+    }, 10000);
 
     const cleanup = () => {
+      meterStop.current?.();
+      meterStop.current = null;
+      setLevels({});
       for (const track of localTracks.current.values()) track.enabled = false;
       localTracks.current.clear();
       handles.current.clear();
@@ -236,16 +252,17 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
       const names = roomNames.current;
       const list = event.participants as { id: number; display?: string }[] | undefined;
       if (Array.isArray(list)) for (const item of list) if (item.display) names.set(item.id, item.display);
+      if (event.audiobridge === "event" && typeof event.leaving === "number") {
+        const goneName = names.get(event.leaving);
+        if (goneName) setLevel(goneName, null);
+        names.delete(event.leaving);
+        return;
+      }
       const id = event.id as number | undefined;
       if (typeof id !== "number") return;
       if (event.audiobridge === "joined") names.set(id, session.session_id);
       const name = names.get(id);
-      if (event.audiobridge === "event" && event.leaving !== undefined) {
-        const gone = event.leaving as number;
-        const goneName = names.get(gone);
-        if (goneName) setLevel(goneName, null);
-        names.delete(gone);
-      } else if (event.audiobridge === "talking" && name && name !== session.session_id) {
+      if (event.audiobridge === "talking" && name && name !== session.session_id) {
         const avg = Number(event["audio-level-dBov-avg"] ?? event["audio-level-dBov"] ?? 30);
         setLevel(name, -Math.abs(avg) / 2);
       } else if (event.audiobridge === "stopped-talking" && name) {
@@ -347,6 +364,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
             setError("");
             void report("connected");
           } else if (wasConnected) {
+            wasConnected = false;
             setConnected(false);
             void report("disconnected");
             scheduleReconnect();
@@ -417,6 +435,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
     return () => {
       stopped = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      window.clearInterval(heartbeat);
       void report("disconnected");
       socket?.close();
       channelRef.current = null;
@@ -426,7 +445,7 @@ export function useLiveAudio(options: LiveAudioOptions): LiveAudioState {
     };
   }, [participant?.session_id, participant?.access_token, mode, inputDeviceId]);
 
-  return { status, error, connected, channel, levels };
+  return { status, error: [error, presenceError].filter(Boolean).join(" "), connected, channel, levels };
 }
 
 function startLocalMeter(track: MediaStreamTrack, report: (db: number) => void): () => void {

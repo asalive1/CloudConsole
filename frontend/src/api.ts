@@ -120,16 +120,23 @@ export function usePolling<T>(
 
   useEffect(() => {
     let active = true;
+    let requestNumber = 0;
+    let appliedNumber = 0;
     const load = () => {
+      const current = ++requestNumber;
       void apiRequest<T>(path, { headers: { "X-API-Key": apiKey } })
         .then((next) => {
-          if (active) {
+          if (active && current > appliedNumber) {
+            appliedNumber = current;
             setData(next);
             setError("");
           }
         })
         .catch((cause: unknown) => {
-          if (active) setError(errorMessage(cause));
+          if (active && current > appliedNumber) {
+            appliedNumber = current;
+            setError(errorMessage(cause));
+          }
         });
     };
     load();
@@ -147,6 +154,7 @@ export function usePolling<T>(
 export function useMixerChannels(apiKey: string): { channels: MixerChannel[]; error: string } {
   const [channels, setChannels] = useState<MixerChannel[]>([]);
   const [error, setError] = useState("");
+  const [refreshError, setRefreshError] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -165,13 +173,13 @@ export function useMixerChannels(apiKey: string): { channels: MixerChannel[]; er
           channel?: MixerChannel;
         };
         if (message.type === "snapshot") {
-          setChannels(message.channels ?? []);
+          const snapshot = message.channels ?? [];
+          setChannels((current) => mergeMixerSnapshot(current, snapshot));
         } else if (message.channel) {
           const updated = message.channel;
-          setChannels((current) =>
-            current.map((item) =>
-              item.channel_id === updated.channel_id ? { ...item, ...updated } : item,
-            ),
+          setChannels((current) => current.some((item) => item.channel_id === updated.channel_id)
+            ? current.map((item) => item.channel_id === updated.channel_id && updated.revision >= item.revision ? updated : item)
+            : [...current, updated],
           );
         }
       };
@@ -193,12 +201,24 @@ export function useMixerChannels(apiKey: string): { channels: MixerChannel[]; er
   // Sessions joining or leaving change the snapshot, so refresh it periodically.
   useEffect(() => {
     let active = true;
+    let requestNumber = 0;
+    let appliedNumber = 0;
     const load = () => {
+      const request = ++requestNumber;
       void apiRequest<MixerChannel[]>("/mixer/channels", { headers: { "X-API-Key": apiKey } })
         .then((next) => {
-          if (active) setChannels(next);
+          if (active && request > appliedNumber) {
+            appliedNumber = request;
+            setChannels((current) => mergeMixerSnapshot(current, next));
+            setRefreshError("");
+          }
         })
-        .catch(() => undefined);
+        .catch((cause: unknown) => {
+          if (active && request > appliedNumber) {
+            appliedNumber = request;
+            setRefreshError(`Mixer refresh failed: ${errorMessage(cause)}`);
+          }
+        });
     };
     load();
     const timer = window.setInterval(load, 3000);
@@ -208,5 +228,13 @@ export function useMixerChannels(apiKey: string): { channels: MixerChannel[]; er
     };
   }, [apiKey]);
 
-  return { channels, error };
+  return { channels, error: error || refreshError };
+}
+
+function mergeMixerSnapshot(current: MixerChannel[], snapshot: MixerChannel[]): MixerChannel[] {
+  const byId = new Map(current.map((channel) => [channel.channel_id, channel]));
+  return snapshot.map((channel) => {
+    const previous = byId.get(channel.channel_id);
+    return previous && previous.revision > channel.revision ? previous : channel;
+  });
 }

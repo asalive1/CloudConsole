@@ -53,6 +53,10 @@ if [ "$ready" != true ]; then
 fi
 docker exec "$database" psql -U cloud_console -d cloud_console -c \
     "INSERT INTO inputs (id, station_id, name, source_type, enabled, config) VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'Test input', 'aux', true, '{\"type\":\"test\"}');" >/dev/null
+docker exec "$database" psql -v ON_ERROR_STOP=1 -U cloud_console -d cloud_console -c \
+    "INSERT INTO users (id, station_id, name, role) VALUES ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000001', 'Test host', 'host');
+     INSERT INTO sessions (id, station_id, user_id, role, display_name, status, expires_at, created_at) VALUES ('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000003', 'host', 'Connected host', 'connected', NOW() + INTERVAL '1 hour', NOW() - INTERVAL '2 hours');
+     INSERT INTO sessions (station_id, user_id, role, display_name, status, expires_at) SELECT '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000003', 'host', 'Old session', 'rejected', NOW() + INTERVAL '1 hour' FROM generate_series(1, 101);" >/dev/null
 
 baseline=$(docker exec "$backend" sh -c 'ls /proc/1/fd | wc -l')
 docker run --rm -i --network "$network" node:24-alpine node - < "$root/backend/tests/mixer-websocket.mjs"
