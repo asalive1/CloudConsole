@@ -24,7 +24,7 @@
             ]
         },
         {
-            "label": "Backup to GitHub",
+            "label": "Build / Deploy",
             "type": "shell",
             "command": "powershell",
             "args": [
@@ -35,7 +35,7 @@
             ]
         },
         {
-            "label": "Push GitHub",
+            "label": "Backup to GitHub",
             "type": "shell",
             "command": "powershell",
             "args": [

@@ -16,11 +16,15 @@ if ($status -notmatch "ahead") {
     exit
 }
 
-git push origin main
+Write-Host "Backing up branch:"
+Write-Host "  $GitBranch"
+Write-Host ""
+
+git push origin $GitBranch
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
-    Write-Host "GitHub push failed."
+    Write-Host "Backup failed."
     Write-Host ""
     exit
 }
