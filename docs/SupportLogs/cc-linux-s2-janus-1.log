@@ -1,0 +1,174 @@
+2026-11-17T13:58:58.571079276Z Janus version: 1403 (1.4.3)
+2026-11-17T13:58:58.571155108Z Janus commit: not-a-git-repo
+2026-11-17T13:58:58.571164821Z Compiled on:  Sun Oct 18 03:53:35 UTC 2026
+2026-11-17T13:58:58.571170938Z 
+2026-11-17T13:58:58.571175985Z Logger plugins folder: /var/janus/janus/lib/janus/loggers
+2026-11-17T13:58:58.571180985Z [WARN] 	Couldn't access logger plugins folder...
+2026-11-17T13:58:58.571186605Z ---------------------------------------------------
+2026-11-17T13:58:58.571191588Z   Starting Meetecho Janus (WebRTC Server) v1.4.3
+2026-11-17T13:58:58.571196528Z ---------------------------------------------------
+2026-11-17T13:58:58.571201545Z 
+2026-11-17T13:58:58.571206315Z Checking command line arguments...
+2026-11-17T13:58:58.571211301Z Debug/log level is 4
+2026-11-17T13:58:58.571216198Z Debug/log timestamps are disabled
+2026-11-17T13:58:58.571221135Z Debug/log colors are enabled
+2026-11-17T13:58:58.571226068Z Adding 'vmnet' to the ICE ignore list...
+2026-11-17T13:58:58.571231039Z Using 172.19.0.4 as local IP...
+2026-11-17T13:58:58.571236485Z Token based authentication disabled
+2026-11-17T13:58:58.571241525Z Initializing recorder code
+2026-11-17T13:58:58.571246485Z RTP port range: 7020 -- 7099
+2026-11-17T13:58:58.571251421Z Using nat_1_1_mapping for public IP: 192.168.50.147
+2026-11-17T13:58:58.571256692Z Initializing ICE stuff (Full mode, ICE-TCP candidates disabled, half-trickle, IPv6 support disabled)
+2026-11-17T13:58:58.571261999Z ICE port range: 7020-7099
+2026-11-17T13:58:58.573577313Z TURN REST API backend: (disabled)
+2026-11-17T13:58:58.573605583Z [33m[WARN][0m Janus is deployed on a private address (192.168.50.147) but you didn't specify any STUN server! Expect trouble if this is supposed to work over the internet and not just in a LAN...
+2026-11-17T13:58:58.575970889Z Crypto: OpenSSL >= 1.1.0
+2026-11-17T13:58:58.576017892Z [33m[WARN][0m The libsrtp installation does not support AES-GCM profiles
+2026-11-17T13:58:58.577841045Z No cert/key specified, autogenerating some...
+2026-11-17T13:58:58.581497408Z Fingerprint of our certificate: 7F:A9:72:A3:97:23:CA:B8:F0:B9:5C:85:FD:D4:3E:31:23:F7:AF:64:AC:DB:E2:33:EF:27:38:4E:5A:4A:5C:5A
+2026-11-17T13:58:58.610685800Z [33m[WARN][0m Data Channels support not compiled
+2026-11-17T13:58:58.611162803Z Sessions watchdog started
+2026-11-17T13:58:58.611203566Z Joining Janus requests handler thread
+2026-11-17T13:58:58.611212537Z Event handlers support disabled
+2026-11-17T13:58:58.611218987Z Plugins folder: /var/janus/janus/lib/janus/plugins
+2026-11-17T13:58:58.611551609Z Loading plugin 'libjanus_textroom.so'...
+2026-11-17T13:58:58.612101156Z [33m[WARN][0m Data channels support not compiled, disabling TextRoom plugin
+2026-11-17T13:58:58.612137499Z [33m[WARN][0m The 'janus.plugin.textroom' plugin could not be initialized
+2026-11-17T13:58:58.612143143Z Loading plugin 'libjanus_sip.so'...
+2026-11-17T13:58:58.615389987Z JANUS SIP plugin initialized!
+2026-11-17T13:58:58.615437641Z Loading plugin 'libjanus_videoroom.so'...
+2026-11-17T13:58:58.615897147Z JANUS VideoRoom plugin initialized!
+2026-11-17T13:58:58.615918596Z Loading plugin 'libjanus_audiobridge.so'...
+2026-11-17T13:58:58.616884769Z [33m[WARN][0m Denoising via RNNoise NOT supported
+2026-11-17T13:58:58.616902028Z Initializing optimized limiter implementation
+2026-11-17T13:58:58.616906033Z Using scalar implementation of limiter
+2026-11-17T13:58:58.617071611Z JANUS AudioBridge plugin initialized!
+2026-11-17T13:58:58.617080998Z Loading plugin 'libjanus_echotest.so'...
+2026-11-17T13:58:58.617467885Z JANUS EchoTest plugin initialized!
+2026-11-17T13:58:58.617480630Z Loading plugin 'libjanus_nosip.so'...
+2026-11-17T13:58:58.617964435Z JANUS NoSIP plugin initialized!
+2026-11-17T13:58:58.617980839Z Loading plugin 'libjanus_streaming.so'...
+2026-11-17T13:58:58.619847509Z JANUS Streaming plugin initialized!
+2026-11-17T13:58:58.619867757Z Loading plugin 'libjanus_videocall.so'...
+2026-11-17T13:58:58.620533714Z JANUS VideoCall plugin initialized!
+2026-11-17T13:58:58.620547410Z Loading plugin 'libjanus_recordplay.so'...
+2026-11-17T13:58:58.621439709Z JANUS Record&Play plugin initialized!
+2026-11-17T13:58:58.621457608Z Transport plugins folder: /var/janus/janus/lib/janus/transports
+2026-11-17T13:58:58.621786052Z Loading transport plugin 'libjanus_pfunix.so'...
+2026-11-17T13:58:58.622303146Z [33m[WARN][0m No Unix Sockets server started, giving up...
+2026-11-17T13:58:58.622325263Z [33m[WARN][0m The 'janus.transport.pfunix' plugin could not be initialized
+2026-11-17T13:58:58.624349192Z Loading transport plugin 'libjanus_http.so'...
+2026-11-17T13:58:58.624364507Z HTTP transport timer started
+2026-11-17T13:58:58.624367457Z HTTP webserver started (port 8088, /janus path listener)...
+2026-11-17T13:58:58.624370132Z JANUS REST (HTTP/HTTPS) transport plugin initialized!
+2026-11-17T13:58:58.624372541Z Loading transport plugin 'libjanus_websockets.so'...
+2026-11-17T13:58:58.624563011Z libwebsockets logging: 0
+2026-11-17T13:58:58.624813950Z Websockets server started (port 8188)...
+2026-11-17T13:58:58.624878098Z JANUS WebSockets transport plugin initialized!
+2026-11-17T13:58:58.624953283Z WebSockets thread started
+2026-11-17T13:59:08.896052732Z Creating new session: 8678299571946573; 0x7cbe10001a30
+2026-11-17T13:59:08.897486396Z Creating new handle in session 8678299571946573: 6610384235368836; 0x7cbe10001a30 0x7cbe100022d0
+2026-11-17T13:59:08.901185078Z Audio limiter enabled for room 4815162343 (Cloud Console live audio)
+2026-11-17T13:59:08.901847859Z Destroying session 8678299571946573; 0x7cbe10001a30
+2026-11-17T13:59:08.901862053Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe100022d0 0x59e0afd9cb10 0x7cbe100022d0 0x7cbe10001d10
+2026-11-17T13:59:08.902177912Z No WebRTC media anymore
+2026-11-17T13:59:08.902186568Z [6610384235368836] Handle and related resources freed; 0x7cbe100022d0 0x7cbe10001a30
+2026-11-17T13:59:08.903083136Z Creating new session: 5747361818866069; 0x7cbe10001b70
+2026-11-17T13:59:08.904828876Z Creating new session: 5395039770867972; 0x7cbe10002260
+2026-11-17T13:59:08.905496208Z Creating new handle in session 5747361818866069: 1419634675327707; 0x7cbe10001b70 0x7cbe10002490
+2026-11-17T13:59:08.906022744Z Creating new handle in session 5395039770867972: 5763098258873467; 0x7cbe10002260 0x7cbe10002cd0
+2026-11-17T13:59:08.910736837Z [AudioBridge-0x7cbde8009bb0] Starting Plain RTP participant thread
+2026-11-17T13:59:08.910987016Z [janus.plugin.audiobridge-0x7cbde800aef0] WebRTC media is now available
+2026-11-17T13:59:08.917517103Z Audio limiter enabled for room 4815162342 (Cloud Console live audio)
+2026-11-17T13:59:08.917553571Z First user/forwarder/file just joined room 4815162343, waking it up...
+2026-11-17T13:59:08.919667626Z Destroying session 5395039770867972; 0x7cbe10002260
+2026-11-17T13:59:08.919689606Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe10002cd0 0x7cbde800ad50 0x7cbe10002cd0 0x7cbde8013a20
+2026-11-17T13:59:08.919903792Z No WebRTC media anymore
+2026-11-17T13:59:08.919953660Z [5763098258873467] Handle and related resources freed; 0x7cbe10002cd0 0x7cbe10002260
+2026-11-17T13:59:08.920589831Z Creating new session: 6039481939805017; 0x7cbde8014f80
+2026-11-17T13:59:08.921494433Z Creating new handle in session 6039481939805017: 5894862896764861; 0x7cbde8014f80 0x7cbe10002cd0
+2026-11-17T13:59:08.924590120Z [janus.plugin.audiobridge-0x7cbde8013d90] WebRTC media is now available
+2026-11-17T13:59:08.924605662Z [AudioBridge-0x7cbde8013f80] Starting Plain RTP participant thread
+2026-11-17T13:59:08.928213801Z First user/forwarder/file just joined room 4815162342, waking it up...
+2026-11-17T13:59:15.651120627Z Creating new session: 8238456877930356; 0x7cbde8013c40
+2026-11-17T13:59:15.652059953Z Creating new handle in session 8238456877930356: 4284822176219169; 0x7cbde8013c40 0x7cbe10003350
+2026-11-17T13:59:15.654120218Z Destroying session 8238456877930356; 0x7cbde8013c40
+2026-11-17T13:59:15.654142289Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe10003350 0x7cbde8000de0 0x7cbe10003350 0x7cbde800add0
+2026-11-17T13:59:15.654244557Z No WebRTC media anymore
+2026-11-17T13:59:15.654279190Z [4284822176219169] Handle and related resources freed; 0x7cbe10003350 0x7cbde8013c40
+2026-11-17T13:59:15.655211379Z Creating new session: 4137821553330820; 0x7cbe10003040
+2026-11-17T13:59:15.656097894Z Creating new handle in session 4137821553330820: 1600658902900567; 0x7cbe10003040 0x7cbe100032e0
+2026-11-17T13:59:15.657777377Z Destroying session 4137821553330820; 0x7cbe10003040
+2026-11-17T13:59:15.657808568Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe100032e0 0x7cbde80150e0 0x7cbe100032e0 0x7cbde8002340
+2026-11-17T13:59:15.657962276Z No WebRTC media anymore
+2026-11-17T13:59:15.657976209Z [1600658902900567] Handle and related resources freed; 0x7cbe100032e0 0x7cbe10003040
+2026-11-17T13:59:16.167672096Z Creating new session: 5788769288546282; 0x7cbe10003040
+2026-11-17T13:59:16.243622830Z Creating new handle in session 5788769288546282: 2229787546443143; 0x7cbe10003040 0x7cbe100032e0
+2026-11-17T13:59:16.244014423Z Creating new handle in session 5788769288546282: 5967458913288047; 0x7cbe10003040 0x7cbe10003a30
+2026-11-17T13:59:16.554436633Z [2229787546443143] Creating ICE agent (ICE Full mode, controlled)
+2026-11-17T13:59:16.562273860Z [5967458913288047] Creating ICE agent (ICE Full mode, controlled)
+2026-11-17T13:59:16.831747644Z [2229787546443143] The DTLS handshake has been completed
+2026-11-17T13:59:16.831813869Z [janus.plugin.audiobridge-0x7cbde8002040] WebRTC media is now available
+2026-11-17T13:59:16.833747635Z [5967458913288047] The DTLS handshake has been completed
+2026-11-17T13:59:16.833774342Z [janus.plugin.audiobridge-0x7cbdec001d80] WebRTC media is now available
+2026-11-17T13:59:28.769962340Z Creating new session: 157931016085931; 0x7cbe10004960
+2026-11-17T13:59:28.770671284Z Creating new handle in session 157931016085931: 3359934053643798; 0x7cbe10004960 0x7cbe100049c0
+2026-11-17T13:59:28.772273123Z Destroying session 157931016085931; 0x7cbe10004960
+2026-11-17T13:59:28.772296358Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe100049c0 0x7cbdec006f00 0x7cbe100049c0 0x7cbde8001bc0
+2026-11-17T13:59:28.772326946Z No WebRTC media anymore
+2026-11-17T13:59:28.772420674Z [3359934053643798] Handle and related resources freed; 0x7cbe100049c0 0x7cbe10004960
+2026-11-17T13:59:28.772944017Z Creating new session: 910509939255675; 0x7cbe10004960
+2026-11-17T13:59:28.773554938Z Creating new handle in session 910509939255675: 8839278052914421; 0x7cbe10004960 0x7cbe10004b80
+2026-11-17T13:59:28.775243015Z Destroying session 910509939255675; 0x7cbe10004960
+2026-11-17T13:59:28.775280942Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe10004b80 0x7cbde8000ea0 0x7cbe10004b80 0x7cbde80012a0
+2026-11-17T13:59:28.775403839Z No WebRTC media anymore
+2026-11-17T13:59:28.775425685Z [8839278052914421] Handle and related resources freed; 0x7cbe10004b80 0x7cbe10004960
+2026-11-17T13:59:29.650132958Z Creating new session: 4119566051449589; 0x7cbe100028c0
+2026-11-17T13:59:29.723293540Z Creating new handle in session 4119566051449589: 8799210068778746; 0x7cbe100028c0 0x7cbe10004b80
+2026-11-17T13:59:29.723350234Z Creating new handle in session 4119566051449589: 8794052037667844; 0x7cbe100028c0 0x7cbe10005100
+2026-11-17T13:59:29.877470269Z [8799210068778746] Creating ICE agent (ICE Full mode, controlled)
+2026-11-17T13:59:29.889738132Z [33m[WARN][0m [8794052037667844] No stream, queueing this trickle as it got here before the SDP...
+2026-11-17T13:59:29.889756511Z [8794052037667844] Creating ICE agent (ICE Full mode, controlled)
+2026-11-17T13:59:29.930110177Z [8799210068778746] The DTLS handshake has been completed
+2026-11-17T13:59:29.930136744Z [janus.plugin.audiobridge-0x7cbde80013b0] WebRTC media is now available
+2026-11-17T13:59:29.976078648Z [8794052037667844] The DTLS handshake has been completed
+2026-11-17T13:59:29.976147084Z [janus.plugin.audiobridge-0x7cbdec006300] WebRTC media is now available
+2026-11-17T13:59:54.963182284Z [WSS-0x7cbdec001140] Destroying WebSocket client
+2026-11-17T13:59:54.963221078Z Destroying session 5788769288546282; 0x7cbe10003040
+2026-11-17T13:59:54.963234608Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe10003a30 0x7cbdec001d80 0x7cbe10003a30 0x7cbdec001f80
+2026-11-17T13:59:54.963247748Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe100032e0 0x7cbde8002040 0x7cbe100032e0 0x7cbde80016a0
+2026-11-17T13:59:54.963260681Z [janus.plugin.audiobridge-0x7cbdec001d80] No WebRTC media anymore
+2026-11-17T13:59:54.963272659Z No WebRTC media anymore
+2026-11-17T13:59:54.965274020Z [5967458913288047] WebRTC resources freed; 0x7cbe10003a30 0x7cbe10003040
+2026-11-17T13:59:54.965293584Z No WebRTC media anymore
+2026-11-17T13:59:54.965297956Z [janus.plugin.audiobridge-0x7cbde8002040] No WebRTC media anymore
+2026-11-17T13:59:54.965301896Z No WebRTC media anymore
+2026-11-17T13:59:54.965305474Z [2229787546443143] WebRTC resources freed; 0x7cbe100032e0 0x7cbe10003040
+2026-11-17T13:59:54.965308942Z No WebRTC media anymore
+2026-11-17T13:59:54.965758914Z [5967458913288047] Handle and related resources freed; 0x7cbe10003a30 0x7cbe10003040
+2026-11-17T13:59:54.967537756Z [2229787546443143] Handle and related resources freed; 0x7cbe100032e0 0x7cbe10003040
+2026-11-17T14:01:55.681022130Z Creating new session: 5223559743946780; 0x7cbe10003db0
+2026-11-17T14:01:55.681752102Z Creating new handle in session 5223559743946780: 3678026352686844; 0x7cbe10003db0 0x7cbe100032e0
+2026-11-17T14:01:55.683657022Z Destroying session 5223559743946780; 0x7cbe10003db0
+2026-11-17T14:01:55.683697049Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe100032e0 0x7cbdec009f00 0x7cbe100032e0 0x7cbde8001c10
+2026-11-17T14:01:55.683707482Z No WebRTC media anymore
+2026-11-17T14:01:55.683751139Z [3678026352686844] Handle and related resources freed; 0x7cbe100032e0 0x7cbe10003db0
+2026-11-17T14:01:55.686050847Z Creating new session: 5557900305306534; 0x7cbe10003040
+2026-11-17T14:01:55.686985645Z Creating new handle in session 5557900305306534: 5607722321297953; 0x7cbe10003040 0x7cbe100032e0
+2026-11-17T14:01:55.690156312Z Destroying session 5557900305306534; 0x7cbe10003040
+2026-11-17T14:01:55.690232290Z Detaching handle from JANUS AudioBridge plugin; 0x7cbe100032e0 0x7cbde8013d60 0x7cbe100032e0 0x7cbde8014f30
+2026-11-17T14:01:55.690246073Z No WebRTC media anymore
+2026-11-17T14:01:55.690254550Z [5607722321297953] Handle and related resources freed; 0x7cbe100032e0 0x7cbe10003040
+2026-11-17T14:01:56.105121499Z Creating new session: 2448954216254685; 0x7cbe100058c0
+2026-11-17T14:01:56.174585092Z Creating new handle in session 2448954216254685: 4866978805267431; 0x7cbe100058c0 0x7cbe100032e0
+2026-11-17T14:01:56.175325877Z Creating new handle in session 2448954216254685: 3125139056585693; 0x7cbe100058c0 0x7cbe100039d0
+2026-11-17T14:01:56.329143125Z [3125139056585693] Creating ICE agent (ICE Full mode, controlled)
+2026-11-17T14:01:56.329195283Z [4866978805267431] Creating ICE agent (ICE Full mode, controlled)
+2026-11-17T14:01:56.346324004Z [33m[WARN][0m [3125139056585693] Error resolving mDNS address (2da9fe78-8a39-45b6-a05d-0ccd9b5fda39.local): Error resolving “2da9fe78-8a39-45b6-a05d-0ccd9b5fda39.local”: Temporary failure in name resolution
+2026-11-17T14:01:56.346901116Z [33m[WARN][0m [4866978805267431] Error resolving mDNS address (2da9fe78-8a39-45b6-a05d-0ccd9b5fda39.local): Error resolving “2da9fe78-8a39-45b6-a05d-0ccd9b5fda39.local”: Temporary failure in name resolution
+2026-11-17T14:01:56.373459345Z [33m[WARN][0m [3125139056585693] Failed to add some remote candidates (added 0, expected 1)
+2026-11-17T14:01:56.379857163Z [33m[WARN][0m [4866978805267431] Failed to add some remote candidates (added 0, expected 1)
+2026-11-17T14:01:56.398867974Z [3125139056585693] The DTLS handshake has been completed
+2026-11-17T14:01:56.398901114Z [janus.plugin.audiobridge-0x7cbdec0042b0] WebRTC media is now available
+2026-11-17T14:01:56.403568666Z [4866978805267431] The DTLS handshake has been completed
+2026-11-17T14:01:56.403605850Z [janus.plugin.audiobridge-0x7cbde800af80] WebRTC media is now available

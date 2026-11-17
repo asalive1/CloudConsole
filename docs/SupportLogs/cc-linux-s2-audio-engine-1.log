@@ -1,0 +1,2 @@
+2026-11-17T13:58:54.089820544Z [2m2026-11-17T13:58:54.089123Z[0m [32m INFO[0m [2mcloud_console_audio_engine[0m[2m:[0m Cloud Console audio engine listening on private Unix socket /run/cloudconsole/engine.sock
+2026-11-17T13:59:09.041295157Z [2m2026-11-17T13:59:09.040559Z[0m [33m WARN[0m [2mcloud_console_audio_engine::pipeline[0m[2m:[0m audio output is falling behind; dropping old buffers [3moutput_id[0m[2m=[0mc760ca7c-bed6-440f-a84d-6b6da08efc06

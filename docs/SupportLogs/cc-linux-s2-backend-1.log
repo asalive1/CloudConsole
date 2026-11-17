@@ -1,0 +1,7 @@
+2026-11-17T13:59:08.840760214Z [2m2026-11-17T13:59:08.840503Z[0m [32m INFO[0m [2msqlx::postgres::notice[0m[2m:[0m relation "_sqlx_migrations" already exists, skipping
+2026-11-17T13:59:08.893158517Z [2m2026-11-17T13:59:08.892923Z[0m [32m INFO[0m [2mcloud_console_api[0m[2m:[0m Cloud Console API listening on 0.0.0.0:8000
+2026-11-17T13:59:08.899092791Z [2m2026-11-17T13:59:08.898925Z[0m [32m INFO[0m [2mcloud_console_api::routes[0m[2m:[0m restored persisted Program delay [3mdelay_seconds[0m[2m=[0m15
+2026-11-17T13:59:08.911778698Z [2m2026-11-17T13:59:08.911622Z[0m [32m INFO[0m [2mcloud_console_api::bridge[0m[2m:[0m audio engine joined Janus [3mport[0m[2m=[0m10000 [3mbus[0m[2m=[0m"Cloud Console Engine Cue"
+2026-11-17T13:59:08.925368664Z [2m2026-11-17T13:59:08.924842Z[0m [32m INFO[0m [2mcloud_console_api::bridge[0m[2m:[0m audio engine joined Janus [3mport[0m[2m=[0m10002 [3mbus[0m[2m=[0m"Cloud Console Engine"
+2026-11-17T13:59:08.947936897Z [2m2026-11-17T13:59:08.947585Z[0m [32m INFO[0m [2mcloud_console_api::bridge[0m[2m:[0m audio engine bridge started [3mremote[0m[2m=[0m172.19.0.4:10000
+2026-11-17T13:59:08.956577108Z [2m2026-11-17T13:59:08.956404Z[0m [32m INFO[0m [2mcloud_console_api::bridge[0m[2m:[0m audio engine bridge started [3mremote[0m[2m=[0m172.19.0.4:10002
