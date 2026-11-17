@@ -1,4 +1,4 @@
-﻿-- Fix invalid RTP payload_type values that exceed the valid range (0-127)
+-- Fix invalid RTP payload_type values that exceed the valid range (0-127)
 -- RTP payload types must be in the range 0-127 per RFC 3550
 -- This migration corrects any output configurations with invalid payload_type values
 -- by resetting them to the default value of 100 (a standard dynamic RTP payload type for audio)
