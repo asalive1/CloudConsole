@@ -1495,7 +1495,7 @@ impl OutputTransport {
                 };
                 let interface_property = rtp_output_binding(host, interface.as_deref())?;
                 Ok(format!(
-                    "queue name=output_queue leaky=downstream max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port}{interface_property} sync=true async=false",
+                    "queue name=output_queue leaky=downstream max-size-buffers=240 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port}{interface_property} sync=true async=false",
                     gst_quote(host)
                 ))
             }
