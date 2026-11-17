@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     body::{to_bytes, Body},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -603,12 +603,29 @@ fn validate_station_resource(request: &StationResourceRequest, kind: &str) -> Re
 fn validate_transport_type(config: Option<&Value>, allowed: &[&str]) -> Result<(), ApiError> {
     let Some(config) = config else { return Ok(()) };
     match config.get("type").and_then(Value::as_str) {
-        Some(kind) if allowed.contains(&kind) => Ok(()),
+        Some(kind) if allowed.contains(&kind) => {
+            // Additional RTP validation for payload_type
+            if kind == "rtp" {
+                validate_rtp_payload_type(config)?;
+            }
+            Ok(())
+        }
         _ => Err(ApiError::InvalidRequest(format!(
             "config.type must be one of: {}",
             allowed.join(", ")
         ))),
     }
+}
+
+fn validate_rtp_payload_type(config: &Value) -> Result<(), ApiError> {
+    if let Some(payload_type) = config.get("payload_type").and_then(Value::as_u64) {
+        if payload_type > 127 {
+            return Err(ApiError::InvalidRequest(
+                "RTP payload_type must be between 0 and 127".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_metadata_config(config: Option<&Value>) -> Result<(), ApiError> {
@@ -2153,3 +2170,4 @@ pub async fn update_monitor_settings(
     .await?;
     Ok(Json(load_monitor_settings(&state).await?))
 }
+
