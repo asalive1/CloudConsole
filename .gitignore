@@ -13,3 +13,9 @@ Thumbs.db
 deploy/local/stations/
 deploy/local/backups/
 stations/
+# Support Logs
+docs/SupportLogs/
+
+# Local Workflow Files
+.jlist.py
+GITHUB_PUSH_INSTRUCTIONS.md
