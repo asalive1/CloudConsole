@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     body::{to_bytes, Body},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -2170,4 +2170,3 @@ pub async fn update_monitor_settings(
     .await?;
     Ok(Json(load_monitor_settings(&state).await?))
 }
-
