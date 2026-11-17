@@ -1020,6 +1020,16 @@ impl AudioEngine {
         let description = transport.gst_description()?;
         let bin = gst::parse::bin_from_description(&description, true)
             .map_err(|error| EngineError::Pipeline(sanitize_pipeline_error(error.to_string())))?;
+        let queue = bin
+            .by_name("output_queue")
+            .ok_or_else(|| EngineError::Pipeline("output pipeline has no queue".to_owned()))?;
+        let reported = AtomicBool::new(false);
+        queue.connect("overrun", false, move |_| {
+            if !reported.swap(true, Ordering::Relaxed) {
+                tracing::warn!(output_id = %id, "audio output is falling behind; dropping old buffers");
+            }
+            None
+        });
         self.pipeline.add(&bin)?;
         let tee_pad = self
             .program_tee
@@ -1466,7 +1476,7 @@ impl OutputTransport {
             } => {
                 let format = pcm_format(*bit_depth, false)?;
                 Ok(format!(
-                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate},channels={channels},format={format} ! alsasink device={} sync=true async=false",
+                    "queue name=output_queue leaky=downstream max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate},channels={channels},format={format} ! alsasink device={} sync=true async=false",
                     gst_quote(device)
                 ))
             }
@@ -1485,7 +1495,7 @@ impl OutputTransport {
                 };
                 let interface_property = rtp_output_binding(host, interface.as_deref())?;
                 Ok(format!(
-                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port}{interface_property} sync=true async=false",
+                    "queue name=output_queue leaky=downstream max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels={channels},format={format} ! rtp{encoding_name}pay pt={payload_type} ! udpsink host={} port={port}{interface_property} sync=true async=false",
                     gst_quote(host)
                 ))
             }
@@ -1514,7 +1524,7 @@ impl OutputTransport {
                     .map(|address| format!(" localaddress={}", gst_quote(&address)))
                     .unwrap_or_default();
                 Ok(format!(
-                    "queue max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! voaacenc bitrate={bitrate} ! aacparse ! mpegtsmux ! srtsink uri={}{local_property} sync=true async=false",
+                    "queue name=output_queue leaky=downstream max-size-buffers=5 max-size-bytes=0 max-size-time=0 ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ! voaacenc bitrate={bitrate} ! aacparse ! mpegtsmux ! srtsink uri={}{local_property} sync=true async=false",
                     gst_quote(&uri)
                 ))
             }
@@ -2372,6 +2382,97 @@ mod tests {
                 "{description}"
             );
         }
+    }
+
+    #[test]
+    fn stalled_output_does_not_block_program_monitor() {
+        gst::init().unwrap();
+        let destination = UdpSocket::bind("127.0.0.1:0").unwrap();
+        destination
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut engine = AudioEngine::new().unwrap();
+        engine.delay_queue.set_property("min-threshold-time", 0u64);
+        let tone = Uuid::new_v4();
+        engine
+            .add_source_with_id(
+                tone,
+                "test tone".to_owned(),
+                SourceType::Automation,
+                InputTransport::Test { frequency: 1_000 },
+            )
+            .unwrap();
+        engine.set_source_mix(tone, 1.0, false, false).unwrap();
+        let output = Uuid::new_v4();
+        engine
+            .add_output_with_id(
+                output,
+                "blocked output".to_owned(),
+                OutputTransport::Rtp {
+                    host: "127.0.0.1".to_owned(),
+                    port: destination.local_addr().unwrap().port(),
+                    encoding: RtpEncoding::L24,
+                    channels: 2,
+                    payload_type: 96,
+                    interface: None,
+                },
+            )
+            .unwrap();
+        let buffers = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&buffers);
+        engine
+            .pipeline
+            .by_name("local_null_sink")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            })
+            .unwrap();
+        let sink = engine.outputs[&output].bin.static_pad("sink").unwrap();
+        let queue = sink
+            .downcast::<gst::GhostPad>()
+            .unwrap()
+            .target()
+            .unwrap()
+            .parent_element()
+            .unwrap();
+        let blocked = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let probe_blocked = Arc::clone(&blocked);
+        let probe_release = Arc::clone(&release);
+        queue
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                probe_blocked.store(true, Ordering::Relaxed);
+                while !probe_release.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                gst::PadProbeReturn::Ok
+            });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !blocked.load(Ordering::Relaxed) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let before = buffers.load(Ordering::Relaxed);
+        thread::sleep(Duration::from_secs(2));
+        let after = buffers.load(Ordering::Relaxed);
+        destination.set_nonblocking(true).unwrap();
+        let mut packet = [0u8; 8192];
+        while destination.recv(&mut packet).is_ok() {}
+        destination.set_nonblocking(false).unwrap();
+        release.store(true, Ordering::Relaxed);
+        let resumed = destination.recv(&mut packet);
+        engine.pipeline.set_state(gst::State::Null).unwrap();
+        assert!(blocked.load(Ordering::Relaxed), "output did not block");
+        assert!(
+            after - before >= 15,
+            "program stalled: {before} -> {after} buffers"
+        );
+        assert!(resumed.is_ok(), "output did not resume: {resumed:?}");
     }
 
     #[test]

@@ -32,6 +32,8 @@ At most one Automation and five AUX source pipelines may be active. A source may
 
 The Program bus has a null sink in addition to configured outputs so the pipeline can initialize without a physical sound device. `GET /api/audio/metrics` reports GStreamer pipeline state, source/output counts, levels, RTP jitter-buffer statistics, and pipeline latency when available.
 
+Each output has a bounded queue. If an output falls behind, its oldest queued audio is dropped rather than blocking the other Program paths; the engine logs a warning once for that output instance. This protects against output backpressure, but does not isolate every possible pipeline error.
+
 ## Program delay
 
 End gradually drains the delay and leaves it off until Build is pressed. Changing the configured delay while it is off or ending does not restart it. Dump clears the buffered audio and automatically rebuilds the delay; End can cancel that rebuild.
