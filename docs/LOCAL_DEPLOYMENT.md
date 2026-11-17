@@ -280,8 +280,9 @@ is required: browsers only allow microphone access on `https://` pages (or `loca
 **Custom locations: none are needed.** Each station's own Nginx already routes `/api/`,
 `/api/mixer/ws`, `/janus` and `/media/`, so everything goes to a single proxy host.
 
-**Advanced tab (recommended):** NPM closes idle connections after 60 seconds by default,
-which drops the WebSockets. Paste:
+**Advanced tab (recommended):** Proxies may close idle WebSocket connections.
+The mixer sends a keepalive every 25 seconds, but longer proxy timeouts also help
+protect other WebSocket connections. Paste:
 
 ```nginx
 proxy_read_timeout 86400s;

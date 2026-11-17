@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const base = "http://cloudconsole-mixer-api:8000";
@@ -8,8 +8,8 @@ const key = "synthetic-test-api-key";
 const id = "00000000-0000-0000-0000-000000000002";
 const wsUrl = `ws://cloudconsole-mixer-api:8000/api/mixer/ws?api_key=${key}`;
 
-async function connect() {
-  const ws = new WebSocket(wsUrl);
+async function connect(url = wsUrl) {
+  const ws = new WebSocket(url);
   const snapshot = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("WebSocket snapshot timed out")), 5000);
     ws.onerror = () => { clearTimeout(timer); reject(new Error("WebSocket connection failed")); };
@@ -161,5 +161,38 @@ await close(ws);
 
 for (let i = 0; i < 100; i++) await close(await connect());
 for (let i = 0; i < 30; i++) await abortConnection();
+
+// Model an intermediary that closes a connection after 90 seconds without server traffic.
+let upstreamChunks = 0;
+const proxy = createServer((client) => {
+  const upstream = createConnection({ host: "cloudconsole-mixer-api", port: 8000 });
+  let idleTimer;
+  const resetIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { client.destroy(); upstream.destroy(); }, 90000);
+  };
+  resetIdleTimer();
+  upstream.on("data", () => { upstreamChunks += 1; resetIdleTimer(); });
+  upstream.on("error", () => client.destroy());
+  client.on("error", () => upstream.destroy());
+  client.on("close", () => { clearTimeout(idleTimer); upstream.destroy(); });
+  upstream.on("close", () => client.destroy());
+  client.pipe(upstream);
+  upstream.pipe(client);
+});
+await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+try {
+  const socket = await connect(`ws://127.0.0.1:${proxy.address().port}/api/mixer/ws?api_key=${key}`);
+  const unexpectedClose = new Promise((_, reject) => {
+    socket.onclose = (event) => reject(new Error(`Idle WebSocket closed early: ${event.code}`));
+    socket.onerror = () => reject(new Error("Idle WebSocket failed"));
+  });
+  await Promise.race([sleep(100000), unexpectedClose]);
+  assert.equal(socket.readyState, WebSocket.OPEN, "idle WebSocket must survive a 90-second proxy timeout");
+  assert.ok(upstreamChunks >= 4, "server should send periodic keepalive frames");
+  await close(socket);
+} finally {
+  await new Promise((resolve, reject) => proxy.close((error) => error ? reject(error) : resolve()));
+}
 await sleep(1000);
-console.log("Mixer snapshots, updates, graceful closes and abrupt disconnects passed");
+console.log("Mixer snapshots, updates, closes and idle proxy keepalive passed");

@@ -1670,8 +1670,21 @@ async fn handle_mixer_websocket(
             return;
         }
     }
+    let keepalive_interval = std::time::Duration::from_secs(25);
+    let mut keepalive = tokio::time::interval_at(
+        tokio::time::Instant::now() + keepalive_interval,
+        keepalive_interval,
+    );
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let update = tokio::select! {
+            _ = keepalive.tick() => {
+                if let Err(error) = socket.send(Message::Ping(Vec::new().into())).await {
+                    tracing::debug!(%error, "mixer websocket keepalive failed");
+                    break;
+                }
+                continue;
+            }
             message = socket.recv() => {
                 match message {
                     Some(Ok(Message::Close(_))) => {
