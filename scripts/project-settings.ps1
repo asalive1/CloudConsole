@@ -8,10 +8,10 @@ $GitBranch = "main"
 
 $VersionPrefix = "v"
 
-#
+#################################################
 # Build Commands
-#
+#################################################
 
-$DevBuildCommand = "docker compose -f docker-compose.local.yml up -d"
+$DevBuildCommand = ""
 
-$ProdBuildCommand = "docker compose -f docker-compose.yml up -d"
+$ProdBuildCommand = ""
